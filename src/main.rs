@@ -10,6 +10,7 @@ const DEFAULT_CACHE_FILE: &str = "popup-cache.json";
 const DEFAULT_POLL_SECONDS: f64 = 1.0;
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct SessionEntry {
+    session_name: String,
     pane_id: u32,
     pane_title: String,
     tab_position: usize,
@@ -22,8 +23,7 @@ struct SessionEntry {
 #[derive(Default)]
 struct State {
     current_session_name: Option<String>,
-    pane_manifest: Option<PaneManifest>,
-    tabs: Vec<TabInfo>,
+    sessions: Vec<SessionInfo>,
     entries: Vec<SessionEntry>,
     selected_index: usize,
     permissions_granted: bool,
@@ -59,6 +59,12 @@ struct StoredPane {
     updated_at_ms: u64,
 }
 
+#[derive(Clone)]
+struct DisplayRow {
+    item: NestedListItem,
+    entry_index: Option<usize>,
+}
+
 register_plugin!(State);
 
 impl ZellijPlugin for State {
@@ -73,6 +79,7 @@ impl ZellijPlugin for State {
             EventType::ModeUpdate,
             EventType::TabUpdate,
             EventType::PaneUpdate,
+            EventType::SessionUpdate,
             EventType::Key,
             EventType::Timer,
             EventType::PermissionRequestResult,
@@ -97,12 +104,33 @@ impl ZellijPlugin for State {
                 true
             }
             Event::TabUpdate(tabs) => {
-                self.tabs = tabs;
+                if let Some(current_session_name) = self.current_session_name.as_deref() {
+                    if let Some(session) = self
+                        .sessions
+                        .iter_mut()
+                        .find(|session| session.name == current_session_name)
+                    {
+                        session.tabs = tabs;
+                    }
+                }
                 self.refresh_entries();
                 true
             }
             Event::PaneUpdate(pane_manifest) => {
-                self.pane_manifest = Some(pane_manifest);
+                if let Some(current_session_name) = self.current_session_name.as_deref() {
+                    if let Some(session) = self
+                        .sessions
+                        .iter_mut()
+                        .find(|session| session.name == current_session_name)
+                    {
+                        session.panes = pane_manifest;
+                    }
+                }
+                self.refresh_entries();
+                true
+            }
+            Event::SessionUpdate(session_infos, _) => {
+                self.sessions = session_infos;
                 self.refresh_entries();
                 true
             }
@@ -159,11 +187,14 @@ impl ZellijPlugin for State {
             .current_session_name
             .as_deref()
             .unwrap_or("unknown session");
+        let tracked_sessions = tracked_session_count(&self.entries);
         let subtitle = format!(
-            "Session {}  {} tracked pane{}",
-            session_name,
+            "{} tracked pane{} across {} session{}  current: {}",
             self.entries.len(),
-            if self.entries.len() == 1 { "" } else { "s" }
+            if self.entries.len() == 1 { "" } else { "s" },
+            tracked_sessions,
+            if tracked_sessions == 1 { "" } else { "s" },
+            session_name,
         );
         print_text_with_coordinates(
             Text::new(truncate(&subtitle, cols.saturating_sub(2))).color_range(0, 8..),
@@ -222,8 +253,11 @@ impl ZellijPlugin for State {
 
         if self.entries.is_empty() {
             let empty = vec![
-                NestedListItem::new("Start an OpenCode pane in this Zellij session to populate this view")
+                NestedListItem::new("Start an OpenCode pane in any Zellij session to populate this view")
                 .color_range(0, 0..6),
+                NestedListItem::new("Sessions are grouped with the current Zellij session first")
+                    .indent(1)
+                    .color_range(2, 27..56),
                 NestedListItem::new("Live states appear automatically when the bundled OpenCode plugin is installed")
                     .indent(1)
                     .color_range(2, 43..59),
@@ -232,16 +266,22 @@ impl ZellijPlugin for State {
             return;
         }
 
-        let visible_rows = body_height.max(3) / 2;
-        let start = scroll_offset(self.selected_index, visible_rows, self.entries.len());
-        let end = (start + visible_rows.max(1)).min(self.entries.len());
-        let mut items = Vec::new();
-        for (visible_index, entry) in self.entries[start..end].iter().enumerate() {
-            let actual_index = start + visible_index;
-            let is_selected = actual_index == self.selected_index;
-            items.push(primary_item(entry, is_selected, cols));
-            items.push(secondary_item(entry, is_selected, cols));
-        }
+        let rows = build_display_rows(&self.entries, session_name, self.selected_index, cols);
+        let selected_row = rows
+            .iter()
+            .position(|row| row.entry_index == Some(self.selected_index))
+            .unwrap_or(0);
+        let visible_rows = body_height.max(1);
+        let header_row = rows[..=selected_row]
+            .iter()
+            .rposition(|row| row.entry_index.is_none())
+            .unwrap_or(0);
+        let start = group_scroll_offset(selected_row, header_row, visible_rows, rows.len());
+        let end = (start + visible_rows).min(rows.len());
+        let items = rows[start..end]
+            .iter()
+            .map(|row| row.item.clone())
+            .collect();
         print_nested_list_with_coordinates(items, 0, body_y, Some(cols), Some(body_height));
     }
 }
@@ -260,7 +300,20 @@ impl State {
                 }
                 BareKey::Enter => {
                     if let Some(entry) = self.entries.get(self.selected_index) {
-                        focus_terminal_pane(entry.pane_id, false);
+                        let is_current_session = self
+                            .current_session_name
+                            .as_deref()
+                            .map(|session_name| session_name == entry.session_name)
+                            .unwrap_or(false);
+                        if is_current_session {
+                            focus_terminal_pane(entry.pane_id, false);
+                        } else {
+                            switch_session_with_focus(
+                                &entry.session_name,
+                                Some(entry.tab_position),
+                                Some((entry.pane_id, false)),
+                            );
+                        }
                         close_self();
                     }
                     return false;
@@ -291,7 +344,7 @@ impl State {
             return;
         }
 
-        let Some(session_name) = self.current_session_name.clone() else {
+        if self.sessions.is_empty() {
             if self.entries.is_empty() {
                 self.restore_cached_entries();
             }
@@ -301,12 +354,7 @@ impl State {
                 self.status_message = None;
             }
             return;
-        };
-
-        let Some(pane_manifest) = &self.pane_manifest else {
-            self.status_message = Some("Waiting for pane metadata...".to_string());
-            return;
-        };
+        }
 
         let tracked_panes = match self.read_state_entries() {
             Ok(state) => state,
@@ -318,52 +366,51 @@ impl State {
             }
         };
 
-        let mut tab_names = HashMap::new();
-        for tab in &self.tabs {
-            tab_names.insert(tab.position, tab.name.clone());
-        }
+        let mut pane_lookup: HashMap<(String, u32), PaneDetails> = HashMap::new();
+        for session in &self.sessions {
+            let mut tab_names = HashMap::new();
+            for tab in &session.tabs {
+                tab_names.insert(tab.position, tab.name.clone());
+            }
 
-        let mut pane_lookup: HashMap<u32, PaneDetails> = HashMap::new();
-        for (tab_position, panes) in &pane_manifest.panes {
-            for pane in panes {
-                if pane.is_plugin || pane.exited {
-                    continue;
+            for (tab_position, panes) in &session.panes.panes {
+                for pane in panes {
+                    if pane.is_plugin || pane.exited {
+                        continue;
+                    }
+                    let default_tab_name = format!("Tab {}", tab_position + 1);
+                    let terminal_command = pane.terminal_command.clone();
+                    pane_lookup.insert(
+                        (session.name.clone(), pane.id),
+                        PaneDetails {
+                            pane_title: clean_pane_title(&pane.title, terminal_command.as_deref()),
+                            tab_position: *tab_position,
+                            tab_name: tab_names
+                                .get(tab_position)
+                                .cloned()
+                                .unwrap_or(default_tab_name),
+                            terminal_command,
+                        },
+                    );
                 }
-                let default_tab_name = format!("Tab {}", tab_position + 1);
-                let terminal_command = pane.terminal_command.clone();
-                pane_lookup.insert(
-                    pane.id,
-                    PaneDetails {
-                        pane_title: clean_pane_title(&pane.title, terminal_command.as_deref()),
-                        tab_position: *tab_position,
-                        tab_name: tab_names
-                            .get(tab_position)
-                            .cloned()
-                            .unwrap_or(default_tab_name),
-                        terminal_command,
-                    },
-                );
             }
         }
 
         let previous_selected = self
             .entries
             .get(self.selected_index)
-            .map(|entry| entry.pane_id);
+            .map(|entry| (entry.session_name.clone(), entry.pane_id));
         let mut entries = Vec::new();
         let mut latest_tracked = HashMap::new();
         for tracked in &tracked_panes {
-            if tracked.session_name != session_name || !is_supported_agent(&tracked.agent) {
+            if !is_supported_agent(&tracked.agent) {
                 continue;
             }
-            let Some(details) = pane_lookup.get(&tracked.pane_id) else {
-                continue;
-            };
-            if !is_agent_pane(details) {
+            if !pane_lookup.contains_key(&(tracked.session_name.clone(), tracked.pane_id)) {
                 continue;
             }
             latest_tracked
-                .entry(tracked.pane_id)
+                .entry((tracked.session_name.clone(), tracked.pane_id))
                 .and_modify(|current: &mut &StoredPane| {
                     if tracked.updated_at_ms > current.updated_at_ms {
                         *current = tracked;
@@ -374,11 +421,13 @@ impl State {
 
         let mut seen_panes = HashMap::new();
         for tracked in latest_tracked.into_values() {
-            let Some(details) = pane_lookup.get(&tracked.pane_id) else {
+            let Some(details) = pane_lookup.get(&(tracked.session_name.clone(), tracked.pane_id))
+            else {
                 continue;
             };
-            seen_panes.insert(tracked.pane_id, true);
+            seen_panes.insert((tracked.session_name.clone(), tracked.pane_id), true);
             entries.push(SessionEntry {
+                session_name: tracked.session_name.clone(),
                 pane_id: tracked.pane_id,
                 pane_title: details.pane_title.clone(),
                 tab_position: details.tab_position,
@@ -389,14 +438,15 @@ impl State {
             });
         }
 
-        for (pane_id, details) in &pane_lookup {
-            if seen_panes.contains_key(pane_id) {
+        for ((session_name, pane_id), details) in &pane_lookup {
+            if seen_panes.contains_key(&(session_name.clone(), *pane_id)) {
                 continue;
             }
             if !is_agent_pane(details) {
                 continue;
             }
             entries.push(SessionEntry {
+                session_name: session_name.clone(),
                 pane_id: *pane_id,
                 pane_title: details.pane_title.clone(),
                 tab_position: details.tab_position,
@@ -408,8 +458,15 @@ impl State {
         }
 
         entries.sort_by(|left, right| {
-            left.tab_position
-                .cmp(&right.tab_position)
+            let current_session_name = self.current_session_name.as_deref().unwrap_or_default();
+            right
+                .session_name
+                .as_str()
+                .eq(current_session_name)
+                .cmp(&left.session_name.as_str().eq(current_session_name))
+                .then(left.session_name.cmp(&right.session_name))
+                .then(left.tab_position.cmp(&right.tab_position))
+                .then(left.tab_name.cmp(&right.tab_name))
                 .then(left.pane_title.cmp(&right.pane_title))
                 .then(right.updated_at_ms.cmp(&left.updated_at_ms))
         });
@@ -417,12 +474,11 @@ impl State {
         self.entries = entries;
         if self.entries.is_empty() {
             self.selected_index = 0;
-        } else if let Some(selected_pane_id) = previous_selected {
-            if let Some(index) = self
-                .entries
-                .iter()
-                .position(|entry| entry.pane_id == selected_pane_id)
-            {
+        } else if let Some(selected_pane) = previous_selected {
+            if let Some(index) = self.entries.iter().position(|entry| {
+                (entry.session_name.as_str(), entry.pane_id)
+                    == (selected_pane.0.as_str(), selected_pane.1)
+            }) {
                 self.selected_index = index;
             } else {
                 self.selected_index = self.selected_index.min(self.entries.len() - 1);
@@ -577,6 +633,14 @@ fn status_summary(status: &str, entries: &[SessionEntry]) -> String {
     format!("{} {}", status_icon(status), count)
 }
 
+fn tracked_session_count(entries: &[SessionEntry]) -> usize {
+    let mut sessions = BTreeMap::new();
+    for entry in entries {
+        sessions.insert(entry.session_name.as_str(), true);
+    }
+    sessions.len()
+}
+
 fn is_supported_agent(agent: &str) -> bool {
     matches!(agent, "opencode" | "claude")
 }
@@ -618,6 +682,48 @@ fn inferred_agent_name(command: Option<&str>) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+fn session_header_item(session_name: &str, is_current: bool, width: usize) -> NestedListItem {
+    let _ = is_current;
+    let line = truncate(session_name, width.saturating_sub(1));
+    NestedListItem::new(line)
+}
+
+fn build_display_rows(
+    entries: &[SessionEntry],
+    current_session_name: &str,
+    selected_index: usize,
+    width: usize,
+) -> Vec<DisplayRow> {
+    let mut rows = Vec::new();
+    let mut last_session = None::<&str>;
+
+    for (index, entry) in entries.iter().enumerate() {
+        if last_session != Some(entry.session_name.as_str()) {
+            rows.push(DisplayRow {
+                item: session_header_item(
+                    &entry.session_name,
+                    entry.session_name == current_session_name,
+                    width,
+                ),
+                entry_index: None,
+            });
+            last_session = Some(entry.session_name.as_str());
+        }
+
+        let is_selected = index == selected_index;
+        rows.push(DisplayRow {
+            item: primary_item(entry, is_selected, width),
+            entry_index: Some(index),
+        });
+        rows.push(DisplayRow {
+            item: secondary_item(entry, is_selected, width),
+            entry_index: Some(index),
+        });
+    }
+
+    rows
 }
 
 fn primary_item(entry: &SessionEntry, is_selected: bool, width: usize) -> NestedListItem {
@@ -665,6 +771,20 @@ fn scroll_offset(selected_index: usize, visible_rows: usize, total_items: usize)
         selected_index + 1 - visible_rows
     } else {
         0
+    }
+}
+
+fn group_scroll_offset(
+    selected_row: usize,
+    header_row: usize,
+    visible_rows: usize,
+    total_rows: usize,
+) -> usize {
+    let default_start = scroll_offset(selected_row, visible_rows, total_rows);
+    if selected_row.saturating_sub(header_row) + 1 <= visible_rows {
+        header_row.min(default_start)
+    } else {
+        default_start
     }
 }
 
