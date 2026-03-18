@@ -322,16 +322,17 @@ impl State {
                     continue;
                 }
                 let default_tab_name = format!("Tab {}", tab_position + 1);
+                let terminal_command = pane.terminal_command.clone();
                 pane_lookup.insert(
                     pane.id,
                     PaneDetails {
-                        pane_title: pane.title.clone(),
+                        pane_title: clean_pane_title(&pane.title, terminal_command.as_deref()),
                         tab_position: *tab_position,
                         tab_name: tab_names
                             .get(tab_position)
                             .cloned()
                             .unwrap_or(default_tab_name),
-                        terminal_command: pane.terminal_command.clone(),
+                        terminal_command,
                     },
                 );
             }
@@ -553,6 +554,28 @@ fn is_agent_pane(details: &PaneDetails) -> bool {
 fn is_agent_command(command: &str) -> bool {
     let command = command.to_ascii_lowercase();
     command.contains("opencode") || command.contains("claude")
+}
+
+fn clean_pane_title(title: &str, terminal_command: Option<&str>) -> String {
+    let cleaned = title.strip_prefix("OC | ").unwrap_or(title).trim();
+    if !cleaned.is_empty() {
+        return cleaned.to_string();
+    }
+
+    inferred_agent_name(terminal_command)
+        .unwrap_or_else(|| title.trim())
+        .to_string()
+}
+
+fn inferred_agent_name(command: Option<&str>) -> Option<&'static str> {
+    let command = command?.to_ascii_lowercase();
+    if command.contains("opencode") {
+        Some("OpenCode")
+    } else if command.contains("claude") {
+        Some("Claude")
+    } else {
+        None
+    }
 }
 
 fn primary_item(entry: &SessionEntry, is_selected: bool, width: usize) -> NestedListItem {
