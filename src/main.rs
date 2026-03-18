@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use zellij_tile::prelude::*;
@@ -8,6 +9,7 @@ use zellij_tile::prelude::*;
 const DEFAULT_STATE_FILE: &str = "opencode-sessions.json";
 const DEFAULT_CACHE_FILE: &str = "popup-cache.json";
 const DEFAULT_POLL_SECONDS: f64 = 1.0;
+const MAX_CACHE_AGE_MS: u64 = 5 * 60 * 1000;
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct SessionEntry {
     session_name: String,
@@ -18,6 +20,13 @@ struct SessionEntry {
     status: String,
     cwd: Option<String>,
     updated_at_ms: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct CachedEntries {
+    generated_at_ms: u64,
+    session_names: Vec<String>,
+    entries: Vec<SessionEntry>,
 }
 
 #[derive(Default)]
@@ -162,7 +171,6 @@ impl ZellijPlugin for State {
             }
             Event::HostFolderChanged(_) => {
                 self.host_dir_ready = true;
-                self.restore_cached_entries();
                 self.refresh_entries();
                 true
             }
@@ -345,26 +353,28 @@ impl State {
         }
 
         if self.sessions.is_empty() {
-            if self.entries.is_empty() {
-                self.restore_cached_entries();
-            }
-            if self.entries.is_empty() {
-                self.status_message = Some("Waiting for Zellij session metadata...".to_string());
-            } else {
-                self.status_message = None;
-            }
+            self.entries.clear();
+            self.selected_index = 0;
+            self.status_message = Some("Waiting for Zellij session metadata...".to_string());
             return;
         }
 
         let tracked_panes = match self.read_state_entries() {
             Ok(state) => state,
             Err(error) => {
+                if self.restore_cached_entries() {
+                    return;
+                }
                 self.entries.clear();
                 self.selected_index = 0;
                 self.status_message = Some(error);
                 return;
             }
         };
+
+        if tracked_panes.is_empty() && self.restore_cached_entries() {
+            return;
+        }
 
         let mut pane_lookup: HashMap<(String, u32), PaneDetails> = HashMap::new();
         for session in &self.sessions {
@@ -491,33 +501,64 @@ impl State {
         self.persist_cached_entries();
     }
 
-    fn restore_cached_entries(&mut self) {
+    fn restore_cached_entries(&mut self) -> bool {
+        if self.sessions.is_empty() {
+            return false;
+        }
+
         let cache_path = Self::cache_path();
         let contents = match fs::read_to_string(&cache_path) {
             Ok(contents) => contents,
-            Err(_) => return,
+            Err(_) => return false,
         };
-        let cached_entries = match serde_json::from_str::<Vec<SessionEntry>>(&contents) {
+        let cached_entries = match serde_json::from_str::<CachedEntries>(&contents) {
             Ok(entries) => entries,
-            Err(_) => return,
+            Err(_) => return false,
         };
 
-        self.entries = cached_entries;
+        if now_ms().saturating_sub(cached_entries.generated_at_ms) > MAX_CACHE_AGE_MS {
+            return false;
+        }
+
+        if cached_entries.session_names != self.current_session_names() {
+            return false;
+        }
+
+        self.entries = cached_entries.entries;
         if self.entries.is_empty() {
             self.selected_index = 0;
         } else {
             self.selected_index = self.selected_index.min(self.entries.len() - 1);
         }
         self.status_message = None;
+        true
     }
 
     fn persist_cached_entries(&self) {
+        if self.sessions.is_empty() {
+            return;
+        }
+
         let cache_path = Self::cache_path();
-        let contents = match serde_json::to_string(&self.entries) {
+        let contents = match serde_json::to_string(&CachedEntries {
+            generated_at_ms: now_ms(),
+            session_names: self.current_session_names(),
+            entries: self.entries.clone(),
+        }) {
             Ok(contents) => contents,
             Err(_) => return,
         };
         let _ = fs::write(cache_path, contents);
+    }
+
+    fn current_session_names(&self) -> Vec<String> {
+        let mut session_names = self
+            .sessions
+            .iter()
+            .map(|session| session.name.clone())
+            .collect::<Vec<_>>();
+        session_names.sort();
+        session_names
     }
 
     fn cache_path() -> PathBuf {
@@ -569,6 +610,13 @@ fn status_icon(status: &str) -> &'static str {
         "waiting_user_input" => "DONE",
         _ => "IDLE",
     }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn status_color_index(status: &str) -> usize {
