@@ -54,14 +54,14 @@ keybinds {
         bind "Alt o" {
             LaunchOrFocusPlugin "file:~/.config/zellij/plugins/falcode-zellij-sessions.wasm" {
                 floating true
-                state_dir "$HOME/.local/state/falcode-zellij"
+                state_dir "__YOUR_HOME_DIR__/.local/state/falcode-zellij"
             }
         }
     }
 }
 ```
 
-> **Note:** Zellij does not expand `~` or `$HOME` in plugin config values. Replace `$HOME` with your actual home directory (e.g. `/home/jane` on Linux, `/Users/jane` on macOS). You can get it by running `echo $HOME`.
+> **Note:** Zellij does not expand `~` or `$HOME` in plugin config values. Replace `__YOUR_HOME_DIR__` with your actual home directory (e.g. `/home/jane` on Linux, `/Users/jane` on macOS). You can get it by running `echo $HOME`.
 
 The `state_dir` must match the directory where the OpenCode plugin writes session state. The default is `~/.local/state/falcode-zellij`.
 
