@@ -1,22 +1,105 @@
 # falcode-zellij
 
-Zellij popup plugin for showing active OpenCode sessions.
+A Zellij plugin that shows all active [OpenCode](https://opencode.ai) sessions across your Zellij sessions in a floating popup. Jump to any agent pane with a single keystroke.
 
-## What it includes
+![falcode-zellij screenshot](assets/screenshot.png)
 
-- a Zellij WASM plugin built from `src/main.rs`
-- a repo-owned OpenCode plugin in `opencode-plugin/falcode.js`
-- a single installer script in `scripts/install.py`
+## Installation
 
-## Local build
+The plugin has two parts:
+
+1. **Zellij WASM plugin** - the floating popup UI
+2. **OpenCode plugin** - reports each pane's status so the popup can display live states
+
+### 1. Download the Zellij plugin
+
+Download `falcode-zellij-sessions.wasm` from the [latest release](https://github.com/victor-falcon/falcode-zellij/releases/latest) and place it in your Zellij plugins directory:
+
+```bash
+mkdir -p ~/.config/zellij/plugins
+curl -L https://github.com/victor-falcon/falcode-zellij/releases/latest/download/falcode-zellij-sessions.wasm \
+  -o ~/.config/zellij/plugins/falcode-zellij-sessions.wasm
+```
+
+### 2. Install the OpenCode plugin
+
+Copy `falcode.js` to your OpenCode plugins directory:
+
+```bash
+mkdir -p ~/.config/opencode/plugins
+curl -L https://raw.githubusercontent.com/victor-falcon/falcode-zellij/main/opencode-plugin/falcode.js \
+  -o ~/.config/opencode/plugins/falcode.js
+```
+
+Then register it in `~/.config/opencode/config.json`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": [
+    "./plugins/falcode.js"
+  ]
+}
+```
+
+If you already have a `config.json`, just add `"./plugins/falcode.js"` to the existing `plugin` array.
+
+## Configuration
+
+Add a keybinding to your Zellij config (`~/.config/zellij/config.kdl`) to launch the plugin as a floating pane:
+
+```kdl
+keybinds {
+    shared {
+        bind "Alt o" {
+            LaunchOrFocusPlugin "file:~/.config/zellij/plugins/falcode-zellij-sessions.wasm" {
+                floating true
+                state_dir "$HOME/.local/state/falcode-zellij"
+            }
+        }
+    }
+}
+```
+
+> **Note:** Zellij does not expand `~` or `$HOME` in plugin config values. Replace `$HOME` with your actual home directory (e.g. `/home/jane` on Linux, `/Users/jane` on macOS). You can get it by running `echo $HOME`.
+
+The `state_dir` must match the directory where the OpenCode plugin writes session state. The default is `~/.local/state/falcode-zellij`.
+
+### Configuration options
+
+| Option | Description | Default |
+|---|---|---|
+| `state_dir` | Absolute path to the shared state directory | _(required)_ |
+| `state_file` | Name of the legacy state file | `opencode-sessions.json` |
+
+## Usage
+
+| Key | Action |
+|---|---|
+| `j` / `Down` | Move selection down |
+| `k` / `Up` | Move selection up |
+| `Enter` | Focus the selected pane (switches session if needed) |
+| `q` / `Esc` | Close the popup |
+
+## Development
+
+Build from source:
 
 ```bash
 rustup target add wasm32-wasip1
 cargo build --release --target wasm32-wasip1
 ```
 
-## Install
+The compiled plugin will be at `target/wasm32-wasip1/release/falcode-zellij-sessions.wasm`.
+
+### Automated local install
+
+For development, the install script builds the WASM plugin, symlinks both plugins into their expected locations, and registers the OpenCode plugin in your config:
 
 ```bash
 python3 scripts/install.py
 ```
+
+## License
+
+MIT
