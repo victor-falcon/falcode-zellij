@@ -24,8 +24,10 @@ export default async (_input) => {
   mkdirSync(panesDir, { recursive: true });
 
   const cwd = Bun.env.PWD ?? process.cwd();
+  let lastStatus = "waiting_user_input";
 
   function writeState(status) {
+    lastStatus = status;
     const payload = {
       agent: "opencode",
       cwd,
@@ -67,7 +69,14 @@ export default async (_input) => {
     writeState("waiting_user_input");
   }
 
+  // Re-write the state file periodically so the WASM plugin knows the
+  // OpenCode process is still alive even when the user hasn't interacted.
+  const heartbeat = setInterval(() => {
+    writeState(lastStatus);
+  }, 60_000);
+
   process.on("exit", () => {
+    clearInterval(heartbeat);
     rmSync(stateFile, { force: true });
   });
 

@@ -9,7 +9,12 @@ use zellij_tile::prelude::*;
 const DEFAULT_STATE_FILE: &str = "opencode-sessions.json";
 const DEFAULT_CACHE_FILE: &str = "popup-cache.json";
 const DEFAULT_POLL_SECONDS: f64 = 1.0;
-const MAX_CACHE_AGE_MS: u64 = 5 * 60 * 1000;
+const SESSION_GRACE_MS: u64 = 10_000;
+/// State files older than this are considered stale for non-current sessions.
+/// The companion falcode.js plugin re-writes files every 60 s (heartbeat), so
+/// 3 minutes gives plenty of margin.
+const MAX_PANE_STATE_AGE_MS: u64 = 3 * 60 * 1000;
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct SessionEntry {
     session_name: String,
@@ -40,6 +45,9 @@ struct State {
     state_file_name: String,
     host_dir_ready: bool,
     status_message: Option<String>,
+    /// Last time each session name appeared in a SessionUpdate, used to
+    /// smooth over Zellij's intermittent session-list flicker.
+    session_last_seen: HashMap<String, u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -56,7 +64,7 @@ struct PaneDetails {
     terminal_command: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct StoredPane {
     pane_id: u32,
     session_name: String,
@@ -139,6 +147,10 @@ impl ZellijPlugin for State {
                 true
             }
             Event::SessionUpdate(session_infos, _) => {
+                let now = now_ms();
+                for session in &session_infos {
+                    self.session_last_seen.insert(session.name.clone(), now);
+                }
                 self.sessions = session_infos;
                 self.refresh_entries();
                 true
@@ -359,23 +371,9 @@ impl State {
             return;
         }
 
-        let tracked_panes = match self.read_state_entries() {
-            Ok(state) => state,
-            Err(error) => {
-                if self.restore_cached_entries() {
-                    return;
-                }
-                self.entries.clear();
-                self.selected_index = 0;
-                self.status_message = Some(error);
-                return;
-            }
-        };
-
-        if tracked_panes.is_empty() && self.restore_cached_entries() {
-            return;
-        }
-
+        // ── Step 1: Build Zellij pane lookup ───────────────────────────
+        // Index every non-plugin, non-exited pane by (session_name, pane_id).
+        // This gives us the live view of what Zellij knows about.
         let mut pane_lookup: HashMap<(String, u32), PaneDetails> = HashMap::new();
         for session in &self.sessions {
             let mut tab_names = HashMap::new();
@@ -406,49 +404,146 @@ impl State {
             }
         }
 
-        let previous_selected = self
-            .entries
-            .get(self.selected_index)
-            .map(|entry| (entry.session_name.clone(), entry.pane_id));
-        let mut entries = Vec::new();
-        let mut latest_tracked = HashMap::new();
-        for tracked in &tracked_panes {
+        // ── Step 2: Read state files (resilient) ───────────────────────
+        // Individual file failures are silently skipped so that one corrupt
+        // or mid-write file never causes all entries to disappear.
+        let tracked_panes = self.read_state_entries_resilient();
+
+        // De-duplicate: for each (session, pane_id) keep the most recent.
+        let mut latest_tracked: HashMap<(String, u32), StoredPane> = HashMap::new();
+        for tracked in tracked_panes {
             if !is_supported_agent(&tracked.agent) {
                 continue;
             }
-            if !pane_lookup.contains_key(&(tracked.session_name.clone(), tracked.pane_id)) {
-                continue;
-            }
+            let key = (tracked.session_name.clone(), tracked.pane_id);
             latest_tracked
-                .entry((tracked.session_name.clone(), tracked.pane_id))
-                .and_modify(|current: &mut &StoredPane| {
+                .entry(key)
+                .and_modify(|current| {
                     if tracked.updated_at_ms > current.updated_at_ms {
-                        *current = tracked;
+                        *current = tracked.clone();
                     }
                 })
                 .or_insert(tracked);
         }
 
-        let mut seen_panes = HashMap::new();
-        for tracked in latest_tracked.into_values() {
-            let Some(details) = pane_lookup.get(&(tracked.session_name.clone(), tracked.pane_id))
-            else {
+        // Build a set of known Zellij session names for validation.
+        // Include sessions currently reported by Zellij AND sessions that were
+        // reported recently (within SESSION_GRACE_MS) to smooth over transient
+        // gaps in Zellij's SessionUpdate events.
+        let now = now_ms();
+        let mut known_sessions: HashMap<String, bool> = self
+            .sessions
+            .iter()
+            .map(|s| (s.name.clone(), true))
+            .collect();
+        for (name, &last_seen) in &self.session_last_seen {
+            if !known_sessions.contains_key(name.as_str())
+                && now.saturating_sub(last_seen) <= SESSION_GRACE_MS
+            {
+                known_sessions.insert(name.clone(), true);
+            }
+        }
+        // Prune session_last_seen entries that are well past the grace window.
+        self.session_last_seen
+            .retain(|_, ts| now.saturating_sub(*ts) <= SESSION_GRACE_MS * 2);
+
+        let previous_selected = self
+            .entries
+            .get(self.selected_index)
+            .map(|entry| (entry.session_name.clone(), entry.pane_id));
+
+        let mut entries = Vec::new();
+        let mut seen_panes: HashMap<(String, u32), bool> = HashMap::new();
+
+        // ── Step 3a: State-file panes ──────────────────────────────────
+        // State files are the primary and authoritative discovery source.
+        //
+        //   Current session  – Zellij gives us reliable pane data via
+        //   PaneUpdate.  Cross-reference: if the state file's pane_id
+        //   doesn't exist in pane_lookup the pane was closed and the
+        //   state file is a leftover.  Drop it.
+        //
+        //   Other sessions that exist in Zellij – trust the state file
+        //   but apply a TTL.  The companion falcode.js plugin writes a
+        //   heartbeat every 60 s, so any live OpenCode process will have
+        //   a file younger than MAX_PANE_STATE_AGE_MS.  Stale files from
+        //   killed/closed panes are dropped.
+        //
+        //   Unknown sessions – the session doesn't exist in Zellij at
+        //   all.  Drop the entry (orphaned state file).
+        let is_current = |name: &str| -> bool {
+            self.current_session_name
+                .as_deref()
+                .map(|s| s == name)
+                .unwrap_or(false)
+        };
+
+        for tracked in latest_tracked.values() {
+            let session_exists = known_sessions.contains_key(tracked.session_name.as_str());
+
+            if !session_exists {
                 continue;
-            };
-            seen_panes.insert((tracked.session_name.clone(), tracked.pane_id), true);
-            entries.push(SessionEntry {
-                session_name: tracked.session_name.clone(),
-                pane_id: tracked.pane_id,
-                pane_title: details.pane_title.clone(),
-                tab_position: details.tab_position,
-                tab_name: details.tab_name.clone(),
-                status: tracked.status.clone(),
-                cwd: tracked.cwd.clone(),
-                updated_at_ms: tracked.updated_at_ms,
-            });
+            }
+
+            let key = (tracked.session_name.clone(), tracked.pane_id);
+
+            if is_current(&tracked.session_name) {
+                // Current session — pane data is reliable.  Drop ghosts.
+                if !pane_lookup.contains_key(&key) {
+                    continue;
+                }
+            } else {
+                // Other session — apply TTL to filter out stale leftovers.
+                if tracked.updated_at_ms != 0
+                    && now.saturating_sub(tracked.updated_at_ms) > MAX_PANE_STATE_AGE_MS
+                {
+                    continue;
+                }
+            }
+
+            seen_panes.insert(key.clone(), true);
+
+            if let Some(details) = pane_lookup.get(&key) {
+                // Zellij has pane-level metadata -- use it for display info.
+                entries.push(SessionEntry {
+                    session_name: tracked.session_name.clone(),
+                    pane_id: tracked.pane_id,
+                    pane_title: details.pane_title.clone(),
+                    tab_position: details.tab_position,
+                    tab_name: details.tab_name.clone(),
+                    status: tracked.status.clone(),
+                    cwd: tracked.cwd.clone(),
+                    updated_at_ms: tracked.updated_at_ms,
+                });
+            } else {
+                // No pane metadata (non-current session, or pane data not
+                // delivered yet).  Use fallback display info from state file.
+                let agent_name = inferred_agent_name(Some(&tracked.agent))
+                    .unwrap_or("Agent")
+                    .to_string();
+                entries.push(SessionEntry {
+                    session_name: tracked.session_name.clone(),
+                    pane_id: tracked.pane_id,
+                    pane_title: agent_name,
+                    tab_position: 0,
+                    tab_name: String::new(),
+                    status: tracked.status.clone(),
+                    cwd: tracked.cwd.clone(),
+                    updated_at_ms: tracked.updated_at_ms,
+                });
+            }
         }
 
+        // ── Step 3b: Zellij panes matching agent heuristics ────────────
+        // Secondary source, current session only: detect agent panes that
+        // don't have state files (e.g. falcode.js not installed, or pane
+        // just started).  We skip non-current sessions here because their
+        // pane data is unreliable and causes false positives (e.g. nvim
+        // panes reusing a pane_id that once ran opencode).
         for ((session_name, pane_id), details) in &pane_lookup {
+            if !is_current(session_name) {
+                continue;
+            }
             if seen_panes.contains_key(&(session_name.clone(), *pane_id)) {
                 continue;
             }
@@ -467,6 +562,7 @@ impl State {
             });
         }
 
+        // ── Step 4: Sort ───────────────────────────────────────────────
         entries.sort_by(|left, right| {
             let current_session_name = self.current_session_name.as_deref().unwrap_or_default();
             right
@@ -481,6 +577,7 @@ impl State {
                 .then(right.updated_at_ms.cmp(&left.updated_at_ms))
         });
 
+        // ── Step 5: Preserve selection ─────────────────────────────────
         self.entries = entries;
         if self.entries.is_empty() {
             self.selected_index = 0;
@@ -501,45 +598,12 @@ impl State {
         self.persist_cached_entries();
     }
 
-    fn restore_cached_entries(&mut self) -> bool {
-        if self.sessions.is_empty() {
-            return false;
-        }
-
-        let cache_path = Self::cache_path();
-        let contents = match fs::read_to_string(&cache_path) {
-            Ok(contents) => contents,
-            Err(_) => return false,
-        };
-        let cached_entries = match serde_json::from_str::<CachedEntries>(&contents) {
-            Ok(entries) => entries,
-            Err(_) => return false,
-        };
-
-        if now_ms().saturating_sub(cached_entries.generated_at_ms) > MAX_CACHE_AGE_MS {
-            return false;
-        }
-
-        if cached_entries.session_names != self.current_session_names() {
-            return false;
-        }
-
-        self.entries = cached_entries.entries;
-        if self.entries.is_empty() {
-            self.selected_index = 0;
-        } else {
-            self.selected_index = self.selected_index.min(self.entries.len() - 1);
-        }
-        self.status_message = None;
-        true
-    }
-
     fn persist_cached_entries(&self) {
         if self.sessions.is_empty() {
             return;
         }
 
-        let cache_path = Self::cache_path();
+        let cache_path = Path::new("/host").join(DEFAULT_CACHE_FILE);
         let contents = match serde_json::to_string(&CachedEntries {
             generated_at_ms: now_ms(),
             session_names: self.current_session_names(),
@@ -561,44 +625,44 @@ impl State {
         session_names
     }
 
-    fn cache_path() -> PathBuf {
-        Path::new("/host").join(DEFAULT_CACHE_FILE)
-    }
-
-    fn read_state_entries(&self) -> Result<Vec<StoredPane>, String> {
+    /// Read all valid state files, skipping any that fail to read or parse.
+    /// No TTL filtering is done here -- callers decide whether to apply age
+    /// checks based on session-existence context.
+    fn read_state_entries_resilient(&self) -> Vec<StoredPane> {
         let mut entries = Vec::new();
 
         let pane_dir = Path::new("/host").join("panes");
         if pane_dir.exists() {
-            let dir_entries = fs::read_dir(&pane_dir)
-                .map_err(|error| format!("Failed to read {}: {}", pane_dir.display(), error))?;
-            for entry in dir_entries {
-                let entry = entry.map_err(|error| {
-                    format!("Failed to iterate {}: {}", pane_dir.display(), error)
-                })?;
-                let path = entry.path();
-                if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-                    continue;
+            if let Ok(dir_entries) = fs::read_dir(&pane_dir) {
+                for entry in dir_entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                        continue;
+                    }
+                    let contents = match fs::read_to_string(&path) {
+                        Ok(c) => c,
+                        Err(_) => continue, // file mid-write or deleted -- skip
+                    };
+                    let tracked = match serde_json::from_str::<StoredPane>(&contents) {
+                        Ok(t) => t,
+                        Err(_) => continue, // corrupt or partial JSON -- skip
+                    };
+                    entries.push(tracked);
                 }
-                let contents = fs::read_to_string(&path)
-                    .map_err(|error| format!("Failed to read {}: {}", path.display(), error))?;
-                let tracked = serde_json::from_str::<StoredPane>(&contents)
-                    .map_err(|error| format!("Failed to parse {}: {}", path.display(), error))?;
-                entries.push(tracked);
             }
         }
 
-        let legacy_state = Path::new("/host").join(&self.state_file_name);
-        if entries.is_empty() && legacy_state.exists() {
-            let contents = fs::read_to_string(&legacy_state)
-                .map_err(|error| format!("Failed to read {}: {}", legacy_state.display(), error))?;
-            let tracked = serde_json::from_str::<StoredState>(&contents).map_err(|error| {
-                format!("Failed to parse {}: {}", legacy_state.display(), error)
-            })?;
-            entries.extend(tracked.panes.into_values());
+        // Legacy fallback: single file with all panes.
+        if entries.is_empty() {
+            let legacy_state = Path::new("/host").join(&self.state_file_name);
+            if let Ok(contents) = fs::read_to_string(&legacy_state) {
+                if let Ok(tracked) = serde_json::from_str::<StoredState>(&contents) {
+                    entries.extend(tracked.panes.into_values());
+                }
+            }
         }
 
-        Ok(entries)
+        entries
     }
 }
 
@@ -694,20 +758,22 @@ fn is_supported_agent(agent: &str) -> bool {
 }
 
 fn is_agent_pane(details: &PaneDetails) -> bool {
-    let title = details.pane_title.to_ascii_lowercase();
-    if title.contains("opencode") || title.contains("claude") {
+    if is_agent_command(details.terminal_command.as_deref()) {
         return true;
     }
-    details
-        .terminal_command
-        .as_deref()
-        .map(is_agent_command)
-        .unwrap_or(false)
+
+    let title = details.pane_title.to_ascii_lowercase();
+    title.contains("opencode") || title.contains("claude")
 }
 
-fn is_agent_command(command: &str) -> bool {
-    let command = command.to_ascii_lowercase();
-    command.contains("opencode") || command.contains("claude")
+fn is_agent_command(command: Option<&str>) -> bool {
+    match command {
+        Some(cmd) => {
+            let lower = cmd.to_ascii_lowercase();
+            lower.contains("opencode") || lower.contains("claude")
+        }
+        None => false,
+    }
 }
 
 fn clean_pane_title(title: &str, terminal_command: Option<&str>) -> String {
