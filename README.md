@@ -4,7 +4,7 @@ A Zellij plugin that shows all active [OpenCode](https://opencode.ai) sessions a
 
 ![falcode-zellij screenshot](assets/screenshot.png)
 
-> This plugins works really good with the [https://github.com/victor-falcon/git-worktree-zellij](git-worktree-zellij). Create and delete worktrees with a really simplo cli.
+> This plugins works really good with the [https://github.com/victor-falcon/git-worktree-zellij](git-worktree-zellij). Create and delete worktrees with a really simple cli.
 
 ## Installation
 
