@@ -362,6 +362,27 @@ impl State {
                     }
                     return false;
                 }
+                BareKey::Char(c @ '1'..='9') => {
+                    let entry_index = (c as usize) - ('1' as usize);
+                    if let Some(entry) = self.entries.get(entry_index) {
+                        let is_current_session = self
+                            .current_session_name
+                            .as_deref()
+                            .map(|session_name| session_name == entry.session_name)
+                            .unwrap_or(false);
+                        if is_current_session {
+                            focus_terminal_pane(entry.pane_id, false);
+                        } else {
+                            switch_session_with_focus(
+                                &entry.session_name,
+                                Some(entry.tab_position),
+                                Some((entry.pane_id, false)),
+                            );
+                        }
+                        close_self();
+                    }
+                    return false;
+                }
                 BareKey::Esc | BareKey::Char('q') => {
                     close_self();
                     return false;
@@ -980,6 +1001,7 @@ fn render_footer(y: usize, cols: usize) {
     let prefix = "Help:";
     let segments = [
         ("<Enter>", "focus pane"),
+        ("<1-9>", "jump to pane"),
         ("<j/k>", "move"),
         ("<q>", "close"),
     ];
@@ -1115,8 +1137,9 @@ fn build_display_rows(
         }
 
         let is_selected = index == selected_index;
+        let shortcut_number = if index < 9 { Some(index + 1) } else { None };
         rows.push(DisplayRow {
-            item: primary_item(entry, is_selected, width),
+            item: primary_item(entry, is_selected, width, shortcut_number),
             entry_index: Some(index),
         });
         rows.push(DisplayRow {
@@ -1128,18 +1151,32 @@ fn build_display_rows(
     rows
 }
 
-fn primary_item(entry: &SessionEntry, is_selected: bool, width: usize) -> NestedListItem {
+fn primary_item(
+    entry: &SessionEntry,
+    is_selected: bool,
+    width: usize,
+    shortcut_number: Option<usize>,
+) -> NestedListItem {
     let tab = format!("[{}]", entry.tab_name);
     let icon = status_icon(&entry.status);
+    let prefix = match shortcut_number {
+        Some(n) => format!("[{}] ", n),
+        None => String::from("    "),
+    };
     let line = truncate(
-        &format!("{}  {}  {}", icon, entry.pane_title, tab),
+        &format!("{}{}  {}  {}", prefix, icon, entry.pane_title, tab),
         width.saturating_sub(1),
     );
-    let icon_end = icon.len().min(line.len());
+    let prefix_end = prefix.len().min(line.len());
+    let icon_end = (prefix.len() + icon.len()).min(line.len());
     let title_start = (icon_end + 2).min(line.len());
-    let title_end = line.find("  [").unwrap_or(line.len());
+    let title_end = line[prefix_end..]
+        .find("  [")
+        .map(|p| p + prefix_end)
+        .unwrap_or(line.len());
     let mut item = NestedListItem::new(line)
-        .color_range(status_color_index(&entry.status), 0..icon_end)
+        .color_range(3, 0..prefix_end)
+        .color_range(status_color_index(&entry.status), prefix_end..icon_end)
         .color_range(2, title_start..title_end)
         .color_range(0, title_end..);
     if is_selected {
