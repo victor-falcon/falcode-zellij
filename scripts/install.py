@@ -9,10 +9,13 @@ import subprocess
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 SOURCE_OPENCODE_PLUGIN = REPO_ROOT / "opencode-plugin" / "falcode.js"
+SOURCE_DETECTION_SCRIPT = REPO_ROOT / "scripts" / "detect-active-opencode.sh"
 OPENCODE_DIR = pathlib.Path.home() / ".config" / "opencode"
 OPENCODE_PLUGINS_DIR = OPENCODE_DIR / "plugins"
 TARGET_OPENCODE_PLUGIN = OPENCODE_PLUGINS_DIR / "falcode.js"
 OPENCODE_CONFIG_FILE = OPENCODE_DIR / "config.json"
+STATE_DIR = pathlib.Path.home() / ".local" / "state" / "falcode-zellij"
+TARGET_DETECTION_SCRIPT = STATE_DIR / "detect-active-opencode.sh"
 
 ZELLIJ_PLUGINS_DIR = pathlib.Path.home() / ".config" / "zellij" / "plugins"
 SOURCE_WASM = REPO_ROOT / "target" / "wasm32-wasip1" / "release" / "falcode-zellij-sessions.wasm"
@@ -61,9 +64,11 @@ def build_wasm() -> None:
 def main() -> None:
     build_wasm()
     ensure_symlink(SOURCE_OPENCODE_PLUGIN, TARGET_OPENCODE_PLUGIN)
+    ensure_symlink(SOURCE_DETECTION_SCRIPT, TARGET_DETECTION_SCRIPT)
     ensure_opencode_config()
     ensure_symlink(SOURCE_WASM, TARGET_WASM)
     print(f"Linked {TARGET_OPENCODE_PLUGIN} -> {SOURCE_OPENCODE_PLUGIN}")
+    print(f"Linked {TARGET_DETECTION_SCRIPT} -> {SOURCE_DETECTION_SCRIPT}")
     print(f"Updated {OPENCODE_CONFIG_FILE}")
     print(f"Linked {TARGET_WASM} -> {SOURCE_WASM}")
     print("If needed, reload Zellij so it picks up the latest plugin build.")

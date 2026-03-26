@@ -11,7 +11,7 @@ A Zellij plugin that shows all active [OpenCode](https://opencode.ai) sessions a
 The plugin has two parts:
 
 1. **Zellij WASM plugin** - the floating popup UI
-2. **OpenCode plugin** - reports each pane's status so the popup can display live states
+2. **OpenCode plugin** - reports each pane's status and installs the editable detection script in the shared state directory
 
 ### 1. Download the Zellij plugin
 
@@ -67,12 +67,20 @@ keybinds {
 
 The `state_dir` must match the directory where the OpenCode plugin writes session state. The default is `~/.local/state/falcode-zellij`.
 
+When the OpenCode plugin starts, it also creates `detect-active-opencode.sh` and `detect-active-opencode.default.sh` inside that `state_dir`. The popup calls `detect-active-opencode.sh` to get the active pane list as JSON, so you can tweak detection logic there without rebuilding the WASM plugin.
+
+- Edit `~/.local/state/falcode-zellij/detect-active-opencode.sh` to customize detection locally.
+- `detect-active-opencode.default.sh` is the bundled reference copy that gets refreshed automatically.
+- Your customized `detect-active-opencode.sh` is only created once and is not overwritten afterward.
+
 ### Configuration options
 
 | Option | Description | Default |
 |---|---|---|
 | `state_dir` | Absolute path to the shared state directory | _(required)_ |
 | `state_file` | Name of the legacy state file | `opencode-sessions.json` |
+
+The popup now requests Zellij's `Run commands` permission as well, because it executes the detection shell script on the host.
 
 ## Usage
 

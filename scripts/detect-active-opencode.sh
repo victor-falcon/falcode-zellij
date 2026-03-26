@@ -1,26 +1,14 @@
-/**
- * OpenCode plugin for Zellij session status reporting.
- *
- * Install this file into ~/.config/opencode/plugins/falcode.js and add it to
- * ~/.config/opencode/config.json under the `plugin` array.
- */
-
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import path from "node:path";
-
-const DETECTION_SCRIPT_NAME = "detect-active-opencode.sh";
-const DETECTION_SCRIPT_DEFAULT_NAME = "detect-active-opencode.default.sh";
-const DETECTION_SCRIPT = `#!/bin/sh
+#!/bin/sh
 
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-STATE_DIR=\${FALCODE_STATE_DIR:-$SCRIPT_DIR}
-SNAPSHOT_FILE=\${FALCODE_SNAPSHOT_FILE:-$STATE_DIR/detect-active-opencode.snapshot.tsv}
-CACHE_FILE=\${FALCODE_CACHE_FILE:-$STATE_DIR/popup-cache.json}
-CURRENT_SESSION=\${FALCODE_CURRENT_SESSION:-}
-NOW_MS=\${FALCODE_NOW_MS:-$(python3 -c 'import time; print(int(time.time() * 1000))')}
-MAX_AGE_MS=\${FALCODE_MAX_PANE_STATE_AGE_MS:-180000}
+STATE_DIR=${FALCODE_STATE_DIR:-$SCRIPT_DIR}
+SNAPSHOT_FILE=${FALCODE_SNAPSHOT_FILE:-$STATE_DIR/detect-active-opencode.snapshot.tsv}
+CACHE_FILE=${FALCODE_CACHE_FILE:-$STATE_DIR/popup-cache.json}
+CURRENT_SESSION=${FALCODE_CURRENT_SESSION:-}
+NOW_MS=${FALCODE_NOW_MS:-$(python3 -c 'import time; print(int(time.time() * 1000))')}
+MAX_AGE_MS=${FALCODE_MAX_PANE_STATE_AGE_MS:-180000}
 
 if [ ! -f "$SNAPSHOT_FILE" ] && [ -f "$CACHE_FILE" ]; then
   if python3 - "$CACHE_FILE" "$NOW_MS" "$MAX_AGE_MS" <<'PY'
@@ -45,14 +33,14 @@ if generated_at_ms and now_ms - generated_at_ms > max_age_ms:
     raise SystemExit(1)
 
 json.dump(entries, sys.stdout, separators=(",", ":"))
-sys.stdout.write("\\n")
+sys.stdout.write("\n")
 PY
   then
     exit 0
   fi
 fi
 
-tmp_input=$(mktemp "\${TMPDIR:-/tmp}/falcode-detect.XXXXXX")
+tmp_input=$(mktemp "${TMPDIR:-/tmp}/falcode-detect.XXXXXX")
 cleanup() {
   rm -f "$tmp_input"
 }
@@ -75,7 +63,7 @@ output_path = pathlib.Path(sys.argv[2])
 def clean(value):
     if value is None:
         return ""
-    return str(value).replace("\\t", " ").replace("\\n", " ").replace("\\r", " ")
+    return str(value).replace("\t", " ").replace("\n", " ").replace("\r", " ")
 
 def append_tracked(pane):
     session_name = clean(pane.get("session_name"))
@@ -86,7 +74,7 @@ def append_tracked(pane):
         return None
     cwd = clean(pane.get("cwd"))
     updated_at_ms = pane.get("updated_at_ms", 0)
-    return f"tracked\\t{session_name}\\t{pane_id}\\t{status}\\t{agent}\\t{cwd}\\t{updated_at_ms}\\n"
+    return f"tracked\t{session_name}\t{pane_id}\t{status}\t{agent}\t{cwd}\t{updated_at_ms}\n"
 
 records = []
 seen_sessions = set()
@@ -103,7 +91,7 @@ if panes_dir.is_dir():
             continue
         session_name = clean(pane.get("session_name"))
         if session_name and session_name not in seen_sessions:
-            records.append(f"session\\t{session_name}\\n")
+            records.append(f"session\t{session_name}\n")
             seen_sessions.add(session_name)
         records.append(record)
 
@@ -119,7 +107,7 @@ if legacy_state.is_file() and not records:
             continue
         session_name = clean(pane.get("session_name"))
         if session_name and session_name not in seen_sessions:
-            records.append(f"session\\t{session_name}\\n")
+            records.append(f"session\t{session_name}\n")
             seen_sessions.add(session_name)
         records.append(record)
 
@@ -161,16 +149,16 @@ awk -F '\t' -v current_session="$CURRENT_SESSION" -v now_ms="$NOW_MS" -v max_age
 
   function print_entry(session_name, pane_id, pane_title, tab_position, tab_name, status, cwd, updated_at_ms, cwd_json) {
     if (!first_entry) {
-      printf(",\\n")
+      printf(",\n")
     }
-    printf("  {\\\"session_name\\\":\\\"%s\\\",\\\"pane_id\\\":%d,\\\"pane_title\\\":\\\"%s\\\",\\\"tab_position\\\":%d,\\\"tab_name\\\":\\\"%s\\\",\\\"status\\\":\\\"%s\\\",\\\"cwd\\\":",
+    printf("  {\"session_name\":\"%s\",\"pane_id\":%d,\"pane_title\":\"%s\",\"tab_position\":%d,\"tab_name\":\"%s\",\"status\":\"%s\",\"cwd\":",
       json_escape(session_name), pane_id + 0, json_escape(pane_title), tab_position + 0, json_escape(tab_name), json_escape(status))
     if (cwd == "") {
       cwd_json = "null"
     } else {
-      cwd_json = sprintf("\\\"%s\\\"", json_escape(cwd))
+      cwd_json = sprintf("\"%s\"", json_escape(cwd))
     }
-    printf("%s,\\\"updated_at_ms\\\":%d}", cwd_json, updated_at_ms + 0)
+    printf("%s,\"updated_at_ms\":%d}", cwd_json, updated_at_ms + 0)
     first_entry = 0
   }
 
@@ -191,6 +179,7 @@ awk -F '\t' -v current_session="$CURRENT_SESSION" -v now_ms="$NOW_MS" -v max_age
       session_name = decode_field($2)
       pane_id = $3 + 0
       key = session_name SUBSEP pane_id
+      session_has_panes[session_name] = 1
       pane_exists[key] = 1
       pane_order[++pane_count] = key
       pane_tab_position[key] = $4 + 0
@@ -272,139 +261,8 @@ awk -F '\t' -v current_session="$CURRENT_SESSION" -v now_ms="$NOW_MS" -v max_age
     }
 
     if (!first_entry) {
-      printf("\\n")
+      printf("\n")
     }
     print "]"
   }
 ' "$tmp_input"
-`;
-
-function ensureDetectionScript(stateRoot) {
-  const scriptPath = path.join(stateRoot, DETECTION_SCRIPT_NAME);
-  const defaultScriptPath = path.join(stateRoot, DETECTION_SCRIPT_DEFAULT_NAME);
-  writeFileSync(defaultScriptPath, DETECTION_SCRIPT, {
-    encoding: "utf8",
-    mode: 0o755,
-  });
-  try {
-    readFileSync(scriptPath, "utf8");
-    return;
-  } catch {
-    writeFileSync(scriptPath, DETECTION_SCRIPT, {
-      encoding: "utf8",
-      mode: 0o755,
-    });
-  }
-}
-
-function stableSessionKey() {
-  const paneId = Bun.env.ZELLIJ_PANE_ID ?? "unknown-pane";
-  const sessionName = Bun.env.ZELLIJ_SESSION_NAME ?? "unknown-session";
-  return `${sessionName}:${paneId}`;
-}
-
-/** @param {import("@opencode-ai/plugin").PluginInput} _input */
-export default async (_input) => {
-  const paneId = Bun.env.ZELLIJ_PANE_ID;
-  const sessionName = Bun.env.ZELLIJ_SESSION_NAME;
-  if (!paneId || !sessionName) {
-    return {};
-  }
-
-  const stateRoot =
-    Bun.env.FALCODE_STATE_DIR ??
-    path.join(Bun.env.HOME ?? ".", ".local", "state", "falcode-zellij");
-  const panesDir = path.join(stateRoot, "panes");
-  const stateFile = path.join(panesDir, `${paneId}.json`);
-  mkdirSync(panesDir, { recursive: true });
-  ensureDetectionScript(stateRoot);
-
-  const cwd = Bun.env.PWD ?? process.cwd();
-  let lastStatus = "waiting_user_input";
-  let stableId = stableSessionKey();
-
-  function writeState(status) {
-    lastStatus = status;
-    const payload = {
-      agent: "opencode",
-      cwd,
-      stable_id: stableId,
-      pane_id: Number.parseInt(paneId, 10),
-      session_name: sessionName,
-      status,
-      updated_at_ms: Date.now(),
-    };
-    writeFileSync(stateFile, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
-  }
-
-  function handleEvent(evt) {
-    switch (evt.type) {
-      case "permission":
-        writeState("asking_permissions");
-        break;
-      case "question":
-        writeState("waiting_user_answers");
-        break;
-      case "idle":
-        writeState("waiting_user_input");
-        break;
-      case "status": {
-        const status = evt.status;
-        if (status === "busy" || status === "running") {
-          writeState("working");
-        } else if (status === "idle") {
-          writeState("waiting_user_input");
-        }
-        break;
-      }
-    }
-  }
-
-  try {
-    const existing = JSON.parse(readFileSync(stateFile, "utf8"));
-    stableId = existing?.stable_id ?? stableId;
-    writeState(existing?.status ?? "waiting_user_input");
-  } catch {
-    writeState("waiting_user_input");
-  }
-
-  // Re-write the state file periodically so the WASM plugin knows the
-  // OpenCode process is still alive even when the user hasn't interacted.
-  const heartbeat = setInterval(() => {
-    writeState(lastStatus);
-  }, 60_000);
-
-  process.on("exit", () => {
-    clearInterval(heartbeat);
-    rmSync(stateFile, { force: true });
-  });
-
-  return {
-    async "permission.ask"() {
-      handleEvent({ type: "permission" });
-    },
-
-    async "tool.execute.before"(input) {
-      if (input.tool === "question") {
-        handleEvent({ type: "question" });
-      }
-    },
-
-    async event({ event }) {
-      switch (event.type) {
-        case "session.status":
-          handleEvent({
-            type: "status",
-            status: event.properties?.status?.type ?? "idle",
-          });
-          break;
-        case "session.idle":
-          handleEvent({ type: "idle" });
-          break;
-        case "permission.replied":
-          handleEvent({ type: "status", status: "busy" });
-          break;
-      }
-    },
-  };
-};
