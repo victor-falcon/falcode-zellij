@@ -141,10 +141,9 @@ awk -F '\t' -v current_session="$CURRENT_SESSION" -v now_ms="$NOW_MS" -v max_age
     return agent == "opencode" || agent == "claude"
   }
 
-  function is_agent_pane(title, command, lower_title, lower_command) {
-    lower_title = tolower(title)
+  function is_agent_pane(title, command, lower_command) {
     lower_command = tolower(command)
-    return index(lower_title, "opencode") || index(lower_title, "claude") || index(lower_command, "opencode") || index(lower_command, "claude")
+    return index(lower_command, "opencode") || index(lower_command, "claude")
   }
 
   function print_entry(session_name, pane_id, pane_title, tab_position, tab_name, status, cwd, updated_at_ms, cwd_json) {
@@ -223,12 +222,14 @@ awk -F '\t' -v current_session="$CURRENT_SESSION" -v now_ms="$NOW_MS" -v max_age
         continue
       }
 
+      if (tracked_updated_at_ms[key] != 0 && (now_ms - tracked_updated_at_ms[key]) > max_age_ms) {
+        continue
+      }
+
       if (has_snapshot == 1 && (session_name in session_has_panes)) {
         if (!(key in pane_exists)) {
           continue
         }
-      } else if (tracked_updated_at_ms[key] != 0 && (now_ms - tracked_updated_at_ms[key]) > max_age_ms) {
-        continue
       }
 
       seen_panes[key] = 1

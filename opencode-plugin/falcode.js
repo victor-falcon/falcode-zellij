@@ -5,7 +5,13 @@
  * ~/.config/opencode/config.json under the `plugin` array.
  */
 
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
 
 const DETECTION_SCRIPT_NAME = "detect-active-opencode.sh";
@@ -153,10 +159,9 @@ awk -F '\t' -v current_session="$CURRENT_SESSION" -v now_ms="$NOW_MS" -v max_age
     return agent == "opencode" || agent == "claude"
   }
 
-  function is_agent_pane(title, command, lower_title, lower_command) {
-    lower_title = tolower(title)
+  function is_agent_pane(title, command, lower_command) {
     lower_command = tolower(command)
-    return index(lower_title, "opencode") || index(lower_title, "claude") || index(lower_command, "opencode") || index(lower_command, "claude")
+    return index(lower_command, "opencode") || index(lower_command, "claude")
   }
 
   function print_entry(session_name, pane_id, pane_title, tab_position, tab_name, status, cwd, updated_at_ms, cwd_json) {
@@ -191,6 +196,7 @@ awk -F '\t' -v current_session="$CURRENT_SESSION" -v now_ms="$NOW_MS" -v max_age
       session_name = decode_field($2)
       pane_id = $3 + 0
       key = session_name SUBSEP pane_id
+      session_has_panes[session_name] = 1
       pane_exists[key] = 1
       pane_order[++pane_count] = key
       pane_tab_position[key] = $4 + 0
@@ -234,12 +240,14 @@ awk -F '\t' -v current_session="$CURRENT_SESSION" -v now_ms="$NOW_MS" -v max_age
         continue
       }
 
+      if (tracked_updated_at_ms[key] != 0 && (now_ms - tracked_updated_at_ms[key]) > max_age_ms) {
+        continue
+      }
+
       if (has_snapshot == 1 && (session_name in session_has_panes)) {
         if (!(key in pane_exists)) {
           continue
         }
-      } else if (tracked_updated_at_ms[key] != 0 && (now_ms - tracked_updated_at_ms[key]) > max_age_ms) {
-        continue
       }
 
       seen_panes[key] = 1
@@ -303,6 +311,31 @@ function stableSessionKey() {
   return `${sessionName}:${paneId}`;
 }
 
+const MAX_PANE_STATE_AGE_MS = 180_000; // 3 minutes
+
+/** Remove state files whose updated_at_ms is older than MAX_PANE_STATE_AGE_MS. */
+function cleanupStalePanes(panesDir) {
+  const now = Date.now();
+  try {
+    for (const file of readdirSync(panesDir)) {
+      if (!file.endsWith(".json")) continue;
+      const filePath = path.join(panesDir, file);
+      try {
+        const data = JSON.parse(readFileSync(filePath, "utf8"));
+        const age = now - (data.updated_at_ms ?? 0);
+        if (age > MAX_PANE_STATE_AGE_MS) {
+          rmSync(filePath, { force: true });
+        }
+      } catch {
+        // Corrupt or partial JSON — safe to remove.
+        rmSync(filePath, { force: true });
+      }
+    }
+  } catch {
+    // panes directory doesn't exist or can't be read — nothing to clean.
+  }
+}
+
 /** @param {import("@opencode-ai/plugin").PluginInput} _input */
 export default async (_input) => {
   const paneId = Bun.env.ZELLIJ_PANE_ID;
@@ -315,9 +348,13 @@ export default async (_input) => {
     Bun.env.FALCODE_STATE_DIR ??
     path.join(Bun.env.HOME ?? ".", ".local", "state", "falcode-zellij");
   const panesDir = path.join(stateRoot, "panes");
-  const stateFile = path.join(panesDir, `${paneId}.json`);
+  const stateFile = path.join(
+    panesDir,
+    `${sessionName.replace(/[^a-zA-Z0-9_-]/g, "_")}_${paneId}.json`,
+  );
   mkdirSync(panesDir, { recursive: true });
   ensureDetectionScript(stateRoot);
+  cleanupStalePanes(panesDir);
 
   const cwd = Bun.env.PWD ?? process.cwd();
   let lastStatus = "waiting_user_input";
@@ -362,7 +399,9 @@ export default async (_input) => {
 
   try {
     const existing = JSON.parse(readFileSync(stateFile, "utf8"));
-    stableId = existing?.stable_id ?? stableId;
+    if (existing?.session_name === sessionName) {
+      stableId = existing?.stable_id ?? stableId;
+    }
     writeState(existing?.status ?? "waiting_user_input");
   } catch {
     writeState("waiting_user_input");

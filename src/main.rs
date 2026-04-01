@@ -722,12 +722,21 @@ impl State {
 
             let key = (tracked.session_name.clone(), tracked.pane_id);
 
-            if sessions_with_live_panes.contains_key(tracked.session_name.as_str()) {
-                if !pane_lookup.contains_key(&key) {
-                    continue;
-                }
-            } else if tracked.updated_at_ms != 0
+            // Always check freshness — the heartbeat in the JS plugin updates
+            // the state file every 60 s, so a 3-minute window is generous for
+            // any live agent.  Without this, stale state files from crashed
+            // processes permanently haunt panes whose IDs get reused.
+            if tracked.updated_at_ms != 0
                 && now.saturating_sub(tracked.updated_at_ms) > MAX_PANE_STATE_AGE_MS
+            {
+                continue;
+            }
+
+            // For sessions with live pane data, also require the pane to still
+            // exist — if the pane was closed, the entry should disappear
+            // immediately rather than lingering for the full TTL.
+            if sessions_with_live_panes.contains_key(tracked.session_name.as_str())
+                && !pane_lookup.contains_key(&key)
             {
                 continue;
             }

@@ -86,6 +86,7 @@ The popup now requests Zellij's `Run commands` permission as well, because it ex
 
 | Key | Action |
 |---|---|
+| `1`-`9` | Jump directly to the numbered pane |
 | `j` / `Down` | Move selection down |
 | `k` / `Up` | Move selection up |
 | `Enter` | Focus the selected pane (switches session if needed) |
