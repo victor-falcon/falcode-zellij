@@ -973,11 +973,11 @@ impl State {
 
 fn status_icon(status: &str) -> &'static str {
     match status {
-        "working" => "RUN",
-        "waiting_user_answers" => "ASK",
-        "asking_permissions" => "PERM",
-        "waiting_user_input" => "DONE",
-        _ => "IDLE",
+        "working" => "󰜎",
+        "waiting_user_answers" => "",
+        "asking_permissions" => "",
+        "waiting_user_input" => "",
+        _ => "",
     }
 }
 
