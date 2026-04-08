@@ -1003,7 +1003,7 @@ fn chip(label: &str, selected: bool) -> Text {
     if selected {
         text = text.selected();
     }
-    text.color_range(0, 1..label.len().saturating_sub(1))
+    text.color_range(0, 1..label.chars().count().saturating_sub(1))
 }
 
 fn render_footer(y: usize, cols: usize) {
@@ -1170,24 +1170,25 @@ fn primary_item(
     let icon = status_icon(&entry.status);
     let prefix = match shortcut_number {
         Some(n) => format!("[{}] ", n),
-        None => String::from("    "),
+        None => String::from(" "),
     };
     let line = truncate(
         &format!("{}{}  {}  {}", prefix, icon, entry.pane_title, tab),
         width.saturating_sub(1),
     );
-    let prefix_end = prefix.len().min(line.len());
-    let icon_end = (prefix.len() + icon.len()).min(line.len());
-    let title_start = (icon_end + 2).min(line.len());
-    let title_end = line[prefix_end..]
-        .find("  [")
-        .map(|p| p + prefix_end)
-        .unwrap_or(line.len());
+    let line_len = line.chars().count();
+    let prefix_end = prefix.chars().count().min(line_len);
+    let icon_end = (prefix_end + icon.chars().count()).min(line_len);
+    let title_start = (icon_end + 2).min(line_len);
+    let title_end = line
+        .rfind("  [")
+        .map(|byte_index| line[..byte_index].chars().count())
+        .unwrap_or(line_len);
     let mut item = NestedListItem::new(line)
         .color_range(3, 0..prefix_end)
         .color_range(status_color_index(&entry.status), prefix_end..icon_end)
         .color_range(2, title_start..title_end)
-        .color_range(0, title_end..);
+        .color_range(0, title_end..line_len);
     if is_selected {
         item = item.selected().opaque();
     }
