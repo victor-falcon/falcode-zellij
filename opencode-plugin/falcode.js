@@ -9,9 +9,12 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 const DETECTION_SCRIPT_NAME = "detect-active-opencode.sh";
@@ -311,6 +314,66 @@ function stableSessionKey() {
   return `${sessionName}:${paneId}`;
 }
 
+/**
+ * Resolve the path to scripts/oc-notify.sh relative to this plugin file.
+ * install.py symlinks the plugin into ~/.config/opencode/plugins, so we
+ * follow the symlink to find the real repo location. Falls back to the
+ * FALCODE_NOTIFY_SCRIPT env var if resolution fails.
+ */
+function resolveNotifyScript() {
+  const override = Bun.env.FALCODE_NOTIFY_SCRIPT;
+  if (override) return override;
+  try {
+    const pluginFile = realpathSync(fileURLToPath(import.meta.url));
+    return path.resolve(path.dirname(pluginFile), "..", "scripts", "oc-notify.sh");
+  } catch {
+    return null;
+  }
+}
+
+const NOTIFY_SCRIPT = resolveNotifyScript();
+
+/**
+ * Map internal pane status → notification status accepted by oc-notify.sh.
+ * Returns null if the status shouldn't trigger a notification.
+ */
+function notificationStatusFor(newStatus, prevStatus) {
+  const ACTIVE = new Set([
+    "working",
+    "asking_permissions",
+    "waiting_user_answers",
+  ]);
+  if (newStatus === "asking_permissions") return "permission";
+  if (newStatus === "waiting_user_answers") return "question";
+  if (newStatus === "waiting_user_input" && ACTIVE.has(prevStatus)) return "idle";
+  return null;
+}
+
+function fireNotification({ status, sessionName, paneId, cwd }) {
+  if (!NOTIFY_SCRIPT) return;
+  const displayName = cwd ? path.basename(cwd) : "OpenCode";
+  try {
+    const child = spawn(
+      NOTIFY_SCRIPT,
+      [
+        "--pane-name",
+        displayName,
+        "--status",
+        status,
+        "--session",
+        sessionName,
+        "--pane-id",
+        String(paneId),
+      ],
+      { detached: true, stdio: "ignore" },
+    );
+    child.unref();
+  } catch {
+    // Notification is best-effort; never break the plugin if the script is
+    // missing or not executable.
+  }
+}
+
 const MAX_PANE_STATE_AGE_MS = 180_000; // 3 minutes
 
 /** Remove state files whose updated_at_ms is older than MAX_PANE_STATE_AGE_MS. */
@@ -359,8 +422,10 @@ export default async (_input) => {
   const cwd = Bun.env.PWD ?? process.cwd();
   let lastStatus = "waiting_user_input";
   let stableId = stableSessionKey();
+  let initialized = false;
 
   function writeState(status) {
+    const prevStatus = lastStatus;
     lastStatus = status;
     const payload = {
       agent: "opencode",
@@ -372,6 +437,18 @@ export default async (_input) => {
       updated_at_ms: Date.now(),
     };
     writeFileSync(stateFile, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+
+    // Only notify on genuine transitions after initial plugin setup.
+    // Initial state bootstrap and heartbeat re-writes must stay silent.
+    if (!initialized || status === prevStatus) return;
+    const notifyStatus = notificationStatusFor(status, prevStatus);
+    if (!notifyStatus) return;
+    fireNotification({
+      status: notifyStatus,
+      sessionName,
+      paneId: Number.parseInt(paneId, 10),
+      cwd,
+    });
   }
 
   function handleEvent(evt) {
@@ -406,6 +483,7 @@ export default async (_input) => {
   } catch {
     writeState("waiting_user_input");
   }
+  initialized = true;
 
   // Re-write the state file periodically so the WASM plugin knows the
   // OpenCode process is still alive even when the user hasn't interacted.
