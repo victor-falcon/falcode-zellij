@@ -6,20 +6,43 @@ set -euo pipefail
 usage() {
   cat >&2 <<'EOF'
 Usage: oc-notify.sh --pane-name <name> --status <status> --session <name> --pane-id <id>
+       oc-notify.sh --focus-now --session <name> --pane-id <id>
 
-Flags (all required):
+Notification flags (all required):
   --pane-name  Raw zellij pane title; leading "OC | " is stripped for display.
   --status     Free-form status string (e.g. idle | permission | question).
                Validation is the caller's responsibility.
   --session    Zellij session name.
   --pane-id    Numeric zellij pane id to focus on click.
+
+Focus flags:
+  --focus-now  Internal mode used by notification clicks.
 EOF
   exit 2
 }
 
+attached_session_name() {
+  local session_name clients_output
+
+  while IFS= read -r session_name; do
+    [[ -z $session_name ]] && continue
+    clients_output="$("$ZELLIJ_BIN" -s "$session_name" action list-clients 2>/dev/null || true)"
+    case "$clients_output" in
+      "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"$'\n'*)
+        printf '%s\n' "$session_name"
+        return 0
+        ;;
+    esac
+  done < <("$ZELLIJ_BIN" list-sessions --short 2>/dev/null || true)
+
+  return 1
+}
+
+focus_now=0
 pane_name=""; status=""; session=""; pane_id=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --focus-now) focus_now=1; shift;;
     --pane-name) pane_name="${2-}"; shift 2;;
     --status)    status="${2-}";    shift 2;;
     --session)   session="${2-}";   shift 2;;
@@ -28,6 +51,21 @@ while [[ $# -gt 0 ]]; do
     *) echo "unknown arg: $1" >&2; usage;;
   esac
 done
+
+ZELLIJ_BIN="$(command -v zellij || echo /opt/homebrew/bin/zellij)"
+
+if [[ $focus_now -eq 1 ]]; then
+  [[ -z $session || -z $pane_id ]] && usage
+  attached_session="$(attached_session_name || true)"
+  target_pane="terminal_${pane_id}"
+  if [[ -n $attached_session && $attached_session != "$session" ]]; then
+    "$ZELLIJ_BIN" -s "$attached_session" action switch-session "$session" --pane-id "$target_pane"
+  else
+    "$ZELLIJ_BIN" -s "$session" action focus-pane-id "$pane_id"
+  fi
+  exit 0
+fi
+
 [[ -z $pane_name || -z $status || -z $session || -z $pane_id ]] && usage
 
 # Mirror clean_pane_title() in src/main.rs:1105 — strip "OC | " + trim.
@@ -41,7 +79,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 ICON="$PROJECT_ROOT/assets/opencode-icon.icns"
 
-ZELLIJ_BIN="$(command -v zellij || echo /opt/homebrew/bin/zellij)"
 TN_BIN="$(command -v terminal-notifier || echo /opt/homebrew/bin/terminal-notifier)"
 
 case "$status" in
@@ -54,10 +91,13 @@ esac
 title="${display_name} ${phrase}"
 message="on session ${session}"
 
-esc_zellij=$(printf %q "$ZELLIJ_BIN")
+SCRIPT_PATH="$SCRIPT_DIR/oc-notify.sh"
+esc_script=$(printf %q "$SCRIPT_PATH")
 esc_session=$(printf %q "$session")
-esc_pane=$(printf %q "$pane_id")
-exec_cmd="open -a Ghostty && ${esc_zellij} -s ${esc_session} action focus-pane-id ${esc_pane}"
+esc_pane_id=$(printf %q "$pane_id")
+
+# Decide same-session vs cross-session at click time, not notification time.
+exec_cmd="open -a Ghostty && ${esc_script} --focus-now --session ${esc_session} --pane-id ${esc_pane_id}"
 
 # Group notifications by session so new ones replace older ones for the
 # same session instead of stacking up in Notification Center.
@@ -68,7 +108,6 @@ args=(
   -title "$title"
   -message "$message"
   -contentImage "$ICON"
-  -group "oc-notify:${session}"
   -wait
   -execute "$exec_cmd"
 )
