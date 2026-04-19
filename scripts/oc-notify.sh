@@ -27,8 +27,9 @@ attached_session_name() {
   while IFS= read -r session_name; do
     [[ -z $session_name ]] && continue
     clients_output="$("$ZELLIJ_BIN" -s "$session_name" action list-clients 2>/dev/null || true)"
+    [[ $clients_output == "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND" ]] && continue
     case "$clients_output" in
-      "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"$'\n'*)
+      "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"$'\n'[0-9]*)
         printf '%s\n' "$session_name"
         return 0
         ;;
@@ -58,7 +59,7 @@ if [[ $focus_now -eq 1 ]]; then
   [[ -z $session || -z $pane_id ]] && usage
   attached_session="$(attached_session_name || true)"
   target_pane="terminal_${pane_id}"
-  if [[ -n $attached_session && $attached_session != "$session" ]]; then
+  if [[ -n $attached_session ]]; then
     "$ZELLIJ_BIN" -s "$attached_session" action switch-session "$session" --pane-id "$target_pane"
   else
     "$ZELLIJ_BIN" -s "$session" action focus-pane-id "$pane_id"
