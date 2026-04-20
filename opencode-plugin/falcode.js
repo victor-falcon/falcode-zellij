@@ -154,17 +154,34 @@ awk -F '\t' -v current_session="$CURRENT_SESSION" -v now_ms="$NOW_MS" -v max_age
     return value
   }
 
+  function command_program(command, parts, first) {
+    command = decode_field(command)
+    sub(/^[[:space:]]+/, "", command)
+    if (command == "") {
+      return ""
+    }
+    split(command, parts, /[[:space:]]+/)
+    first = parts[1]
+    sub(/^.*\//, "", first)
+    return tolower(first)
+  }
+
+  function is_pi_command(lower_command) {
+    return lower_command == "pi" || lower_command ~ /^pi[[:space:]]/ || lower_command ~ /\/pi$/ || lower_command ~ /\/pi[[:space:]]/ || index(lower_command, "pi-coding-agent")
+  }
+
   function agent_name(agent) {
-    return agent == "claude" ? "Claude" : "OpenCode"
+    return agent == "claude" ? "Claude" : agent == "pi" ? "Pi" : "OpenCode"
   }
 
   function is_supported_agent(agent) {
-    return agent == "opencode" || agent == "claude"
+    return agent == "opencode" || agent == "claude" || agent == "pi"
   }
 
-  function is_agent_pane(title, command, lower_command) {
+  function is_agent_pane(title, command, lower_command, program) {
     lower_command = tolower(command)
-    return index(lower_command, "opencode") || index(lower_command, "claude")
+    program = command_program(command)
+    return program == "opencode" || program == "claude" || program == "pi" || program == "pi-coding-agent" || index(lower_command, "opencode") || index(lower_command, "claude") || is_pi_command(lower_command)
   }
 
   function print_entry(session_name, pane_id, pane_title, tab_position, tab_name, status, cwd, updated_at_ms, cwd_json) {
@@ -320,9 +337,18 @@ function stableSessionKey() {
  * follow the symlink to find the real repo location. Falls back to the
  * FALCODE_NOTIFY_SCRIPT env var if resolution fails.
  */
-function resolveNotifyScript() {
+function resolveNotifyScript(stateRoot) {
   const override = Bun.env.FALCODE_NOTIFY_SCRIPT;
   if (override) return override;
+
+  const stateScript = path.join(stateRoot, "oc-notify.sh");
+  try {
+    readFileSync(stateScript, "utf8");
+    return stateScript;
+  } catch {
+    // Fall through.
+  }
+
   try {
     const pluginFile = realpathSync(fileURLToPath(import.meta.url));
     return path.resolve(path.dirname(pluginFile), "..", "scripts", "oc-notify.sh");
@@ -330,8 +356,6 @@ function resolveNotifyScript() {
     return null;
   }
 }
-
-const NOTIFY_SCRIPT = resolveNotifyScript();
 
 /**
  * Map internal pane status → notification status accepted by oc-notify.sh.
@@ -349,13 +373,15 @@ function notificationStatusFor(newStatus, prevStatus) {
   return null;
 }
 
-function fireNotification({ status, sessionName, paneId, cwd }) {
-  if (!NOTIFY_SCRIPT) return;
-  const displayName = cwd ? path.basename(cwd) : "OpenCode";
+function fireNotification({ notifyScript, agent, status, sessionName, paneId, cwd }) {
+  if (!notifyScript) return;
+  const displayName = cwd ? path.basename(cwd) : agent === "pi" ? "Pi" : "OpenCode";
   try {
     const child = spawn(
-      NOTIFY_SCRIPT,
+      notifyScript,
       [
+        "--agent",
+        agent,
         "--pane-name",
         displayName,
         "--status",
@@ -411,6 +437,7 @@ export default async (_input) => {
     Bun.env.FALCODE_STATE_DIR ??
     path.join(Bun.env.HOME ?? ".", ".local", "state", "falcode-zellij");
   const panesDir = path.join(stateRoot, "panes");
+  const notifyScript = resolveNotifyScript(stateRoot);
   const stateFile = path.join(
     panesDir,
     `${sessionName.replace(/[^a-zA-Z0-9_-]/g, "_")}_${paneId}.json`,
@@ -444,6 +471,8 @@ export default async (_input) => {
     const notifyStatus = notificationStatusFor(status, prevStatus);
     if (!notifyStatus) return;
     fireNotification({
+      notifyScript,
+      agent: "opencode",
       status: notifyStatus,
       sessionName,
       paneId: Number.parseInt(paneId, 10),

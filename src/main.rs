@@ -1078,25 +1078,45 @@ fn detection_error_message(exit_code: Option<i32>, stderr: &str) -> String {
 }
 
 fn is_supported_agent(agent: &str) -> bool {
-    matches!(agent, "opencode" | "claude")
+    matches!(agent, "opencode" | "claude" | "pi")
 }
 
 fn is_agent_pane(details: &PaneDetails) -> bool {
     is_agent_command(details.terminal_command.as_deref())
 }
 
+fn command_program_name(command: &str) -> Option<&str> {
+    let first_token = command.split_whitespace().next()?;
+    Path::new(first_token).file_name()?.to_str()
+}
+
+fn is_pi_command(lower: &str) -> bool {
+    lower == "pi"
+        || lower.starts_with("pi ")
+        || lower.ends_with("/pi")
+        || lower.contains("/pi ")
+        || lower.contains("pi-coding-agent")
+}
+
 fn is_agent_command(command: Option<&str>) -> bool {
     match command {
-        Some(cmd) => {
-            let lower = cmd.to_ascii_lowercase();
-            lower.contains("opencode") || lower.contains("claude")
-        }
+        Some(cmd) => match command_program_name(cmd) {
+            Some("opencode" | "claude" | "pi" | "pi-coding-agent") => true,
+            _ => {
+                let lower = cmd.to_ascii_lowercase();
+                lower.contains("opencode") || lower.contains("claude") || is_pi_command(&lower)
+            }
+        },
         None => false,
     }
 }
 
 fn clean_pane_title(title: &str, terminal_command: Option<&str>) -> String {
-    let cleaned = title.strip_prefix("OC | ").unwrap_or(title).trim();
+    let cleaned = title
+        .strip_prefix("OC | ")
+        .or_else(|| title.strip_prefix("PI | "))
+        .unwrap_or(title)
+        .trim();
     if !cleaned.is_empty() {
         return cleaned.to_string();
     }
@@ -1107,13 +1127,23 @@ fn clean_pane_title(title: &str, terminal_command: Option<&str>) -> String {
 }
 
 fn inferred_agent_name(command: Option<&str>) -> Option<&'static str> {
-    let command = command?.to_ascii_lowercase();
-    if command.contains("opencode") {
-        Some("OpenCode")
-    } else if command.contains("claude") {
-        Some("Claude")
-    } else {
-        None
+    let command = command?;
+    match command_program_name(command) {
+        Some("opencode") => Some("OpenCode"),
+        Some("claude") => Some("Claude"),
+        Some("pi" | "pi-coding-agent") => Some("Pi"),
+        _ => {
+            let lower = command.to_ascii_lowercase();
+            if lower.contains("opencode") {
+                Some("OpenCode")
+            } else if lower.contains("claude") {
+                Some("Claude")
+            } else if is_pi_command(&lower) {
+                Some("Pi")
+            } else {
+                None
+            }
+        }
     }
 }
 

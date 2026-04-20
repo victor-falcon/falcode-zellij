@@ -1,14 +1,34 @@
-#!/bin/sh
+/**
+ * Pi extension for Zellij session status reporting.
+ *
+ * Install this file into ~/.pi/agent/extensions/falcode.ts.
+ */
+
+import {
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
+
+const DETECTION_SCRIPT_NAME = "detect-active-opencode.sh";
+const DETECTION_SCRIPT_DEFAULT_NAME = "detect-active-opencode.default.sh";
+const DETECTION_SCRIPT = `#!/bin/sh
 
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-STATE_DIR=${FALCODE_STATE_DIR:-$SCRIPT_DIR}
-SNAPSHOT_FILE=${FALCODE_SNAPSHOT_FILE:-$STATE_DIR/detect-active-opencode.snapshot.tsv}
-CACHE_FILE=${FALCODE_CACHE_FILE:-$STATE_DIR/popup-cache.json}
-CURRENT_SESSION=${FALCODE_CURRENT_SESSION:-}
-NOW_MS=${FALCODE_NOW_MS:-$(python3 -c 'import time; print(int(time.time() * 1000))')}
-MAX_AGE_MS=${FALCODE_MAX_PANE_STATE_AGE_MS:-180000}
+STATE_DIR=\${FALCODE_STATE_DIR:-$SCRIPT_DIR}
+SNAPSHOT_FILE=\${FALCODE_SNAPSHOT_FILE:-$STATE_DIR/detect-active-opencode.snapshot.tsv}
+CACHE_FILE=\${FALCODE_CACHE_FILE:-$STATE_DIR/popup-cache.json}
+CURRENT_SESSION=\${FALCODE_CURRENT_SESSION:-}
+NOW_MS=\${FALCODE_NOW_MS:-$(python3 -c 'import time; print(int(time.time() * 1000))')}
+MAX_AGE_MS=\${FALCODE_MAX_PANE_STATE_AGE_MS:-180000}
 
 if [ ! -f "$SNAPSHOT_FILE" ] && [ -f "$CACHE_FILE" ]; then
   if python3 - "$CACHE_FILE" "$NOW_MS" "$MAX_AGE_MS" <<'PY'
@@ -33,14 +53,14 @@ if generated_at_ms and now_ms - generated_at_ms > max_age_ms:
     raise SystemExit(1)
 
 json.dump(entries, sys.stdout, separators=(",", ":"))
-sys.stdout.write("\n")
+sys.stdout.write("\\n")
 PY
   then
     exit 0
   fi
 fi
 
-tmp_input=$(mktemp "${TMPDIR:-/tmp}/falcode-detect.XXXXXX")
+tmp_input=$(mktemp "\${TMPDIR:-/tmp}/falcode-detect.XXXXXX")
 cleanup() {
   rm -f "$tmp_input"
 }
@@ -165,16 +185,16 @@ awk -F '\t' -v current_session="$CURRENT_SESSION" -v now_ms="$NOW_MS" -v max_age
 
   function print_entry(session_name, pane_id, pane_title, tab_position, tab_name, status, cwd, updated_at_ms, cwd_json) {
     if (!first_entry) {
-      printf(",\n")
+      printf(",\\n")
     }
-    printf("  {\"session_name\":\"%s\",\"pane_id\":%d,\"pane_title\":\"%s\",\"tab_position\":%d,\"tab_name\":\"%s\",\"status\":\"%s\",\"cwd\":",
+    printf("  {\\\"session_name\\\":\\\"%s\\\",\\\"pane_id\\\":%d,\\\"pane_title\\\":\\\"%s\\\",\\\"tab_position\\\":%d,\\\"tab_name\\\":\\\"%s\\\",\\\"status\\\":\\\"%s\\\",\\\"cwd\\\":",
       json_escape(session_name), pane_id + 0, json_escape(pane_title), tab_position + 0, json_escape(tab_name), json_escape(status))
     if (cwd == "") {
       cwd_json = "null"
     } else {
-      cwd_json = sprintf("\"%s\"", json_escape(cwd))
+      cwd_json = sprintf("\\\"%s\\\"", json_escape(cwd))
     }
-    printf("%s,\"updated_at_ms\":%d}", cwd_json, updated_at_ms + 0)
+    printf("%s,\\\"updated_at_ms\\\":%d}", cwd_json, updated_at_ms + 0)
     first_entry = 0
   }
 
@@ -279,8 +299,194 @@ awk -F '\t' -v current_session="$CURRENT_SESSION" -v now_ms="$NOW_MS" -v max_age
     }
 
     if (!first_entry) {
-      printf("\n")
+      printf("\\n")
     }
     print "]"
   }
 ' "$tmp_input"
+`;
+
+const MAX_PANE_STATE_AGE_MS = 180_000;
+
+function ensureDetectionScript(stateRoot) {
+  const scriptPath = path.join(stateRoot, DETECTION_SCRIPT_NAME);
+  const defaultScriptPath = path.join(stateRoot, DETECTION_SCRIPT_DEFAULT_NAME);
+  writeFileSync(defaultScriptPath, DETECTION_SCRIPT, {
+    encoding: "utf8",
+    mode: 0o755,
+  });
+  try {
+    readFileSync(scriptPath, "utf8");
+    return;
+  } catch {
+    writeFileSync(scriptPath, DETECTION_SCRIPT, {
+      encoding: "utf8",
+      mode: 0o755,
+    });
+  }
+}
+
+function stableSessionKey() {
+  const paneId = process.env.ZELLIJ_PANE_ID ?? "unknown-pane";
+  const sessionName = process.env.ZELLIJ_SESSION_NAME ?? "unknown-session";
+  return `${sessionName}:${paneId}`;
+}
+
+function resolveNotifyScript(stateRoot) {
+  const override = process.env.FALCODE_NOTIFY_SCRIPT;
+  if (override) return override;
+
+  const stateScript = path.join(stateRoot, "oc-notify.sh");
+  try {
+    readFileSync(stateScript, "utf8");
+    return stateScript;
+  } catch {
+    // Fall through.
+  }
+
+  try {
+    const extensionFile = realpathSync(fileURLToPath(import.meta.url));
+    return path.resolve(path.dirname(extensionFile), "..", "scripts", "oc-notify.sh");
+  } catch {
+    return null;
+  }
+}
+
+function notificationStatusFor(newStatus, prevStatus) {
+  if (newStatus === "waiting_user_input" && prevStatus === "working") return "idle";
+  return null;
+}
+
+function fireNotification({ notifyScript, agent, status, sessionName, paneId, cwd }) {
+  if (!notifyScript) return;
+  const displayName = cwd ? path.basename(cwd) : agent === "pi" ? "Pi" : "OpenCode";
+  try {
+    const child = spawn(
+      notifyScript,
+      [
+        "--agent",
+        agent,
+        "--pane-name",
+        displayName,
+        "--status",
+        status,
+        "--session",
+        sessionName,
+        "--pane-id",
+        String(paneId),
+      ],
+      { detached: true, stdio: "ignore" },
+    );
+    child.unref();
+  } catch {
+    // Best-effort.
+  }
+}
+
+function cleanupStalePanes(panesDir) {
+  const now = Date.now();
+  try {
+    for (const file of readdirSync(panesDir)) {
+      if (!file.endsWith(".json")) continue;
+      const filePath = path.join(panesDir, file);
+      try {
+        const data = JSON.parse(readFileSync(filePath, "utf8"));
+        const age = now - (data.updated_at_ms ?? 0);
+        if (age > MAX_PANE_STATE_AGE_MS) {
+          rmSync(filePath, { force: true });
+        }
+      } catch {
+        rmSync(filePath, { force: true });
+      }
+    }
+  } catch {
+    // Nothing to clean.
+  }
+}
+
+export default function (_pi) {
+  const paneId = process.env.ZELLIJ_PANE_ID;
+  const sessionName = process.env.ZELLIJ_SESSION_NAME;
+  if (!paneId || !sessionName) {
+    return;
+  }
+
+  const stateRoot =
+    process.env.FALCODE_STATE_DIR ??
+    path.join(process.env.HOME ?? ".", ".local", "state", "falcode-zellij");
+  const panesDir = path.join(stateRoot, "panes");
+  const notifyScript = resolveNotifyScript(stateRoot);
+  const stateFile = path.join(
+    panesDir,
+    `${sessionName.replace(/[^a-zA-Z0-9_-]/g, "_")}_${paneId}.json`,
+  );
+  mkdirSync(panesDir, { recursive: true });
+  ensureDetectionScript(stateRoot);
+  cleanupStalePanes(panesDir);
+
+  const cwd = process.env.PWD ?? process.cwd();
+  let lastStatus = "waiting_user_input";
+  let stableId = stableSessionKey();
+  let initialized = false;
+
+  function writeState(status) {
+    const prevStatus = lastStatus;
+    lastStatus = status;
+    const payload = {
+      agent: "pi",
+      cwd,
+      stable_id: stableId,
+      pane_id: Number.parseInt(paneId, 10),
+      session_name: sessionName,
+      status,
+      updated_at_ms: Date.now(),
+    };
+    writeFileSync(stateFile, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+
+    if (!initialized || status === prevStatus) return;
+    const notifyStatus = notificationStatusFor(status, prevStatus);
+    if (!notifyStatus) return;
+    fireNotification({
+      notifyScript,
+      agent: "pi",
+      status: notifyStatus,
+      sessionName,
+      paneId: Number.parseInt(paneId, 10),
+      cwd,
+    });
+  }
+
+  try {
+    const existing = JSON.parse(readFileSync(stateFile, "utf8"));
+    if (existing?.session_name === sessionName) {
+      stableId = existing?.stable_id ?? stableId;
+    }
+    writeState(existing?.status ?? "waiting_user_input");
+  } catch {
+    writeState("waiting_user_input");
+  }
+  initialized = true;
+
+  const heartbeat = setInterval(() => {
+    writeState(lastStatus);
+  }, 60_000);
+
+  const cleanup = () => {
+    clearInterval(heartbeat);
+    rmSync(stateFile, { force: true });
+  };
+
+  process.once("exit", cleanup);
+
+  _pi.on("agent_start", async () => {
+    writeState("working");
+  });
+
+  _pi.on("agent_end", async () => {
+    writeState("waiting_user_input");
+  });
+
+  _pi.on("session_shutdown", async () => {
+    cleanup();
+  });
+}
