@@ -241,7 +241,7 @@ impl ZellijPlugin for State {
             session_name,
         );
         print_text_with_coordinates(
-            Text::new(truncate(&subtitle, cols.saturating_sub(2))).color_range(0, 8..),
+            Text::new(truncate(&subtitle, cols.saturating_sub(2))),
             0,
             0,
             Some(cols),
