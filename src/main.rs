@@ -298,13 +298,13 @@ impl ZellijPlugin for State {
         if self.entries.is_empty() {
             let empty = vec![
                 NestedListItem::new("Start an OpenCode pane in any Zellij session to populate this view")
-                .color_range(0, 0..6),
+                .color_range(0, 0..5),
                 NestedListItem::new("Sessions are grouped with the current Zellij session first")
                     .indent(1)
-                    .color_range(2, 27..56),
+                    .color_range(2, 26..58),
                 NestedListItem::new("Live states appear automatically when the bundled OpenCode plugin is installed")
                     .indent(1)
-                    .color_range(2, 43..59),
+                    .color_range(2, 42..58),
             ];
             print_nested_list_with_coordinates(empty, 0, body_y + 2, Some(cols), Some(body_height));
             return;
