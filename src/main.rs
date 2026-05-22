@@ -252,10 +252,12 @@ impl ZellijPlugin for State {
             chip(
                 &format!(" {} ", status_summary("working", &self.entries)),
                 false,
+                true,
             ),
             chip(
                 &format!(" {} ", status_summary("asking_permissions", &self.entries)),
                 false,
+                true,
             ),
             chip(
                 &format!(
@@ -263,14 +265,16 @@ impl ZellijPlugin for State {
                     status_summary("waiting_user_answers", &self.entries)
                 ),
                 false,
+                true,
             ),
             chip(
                 &format!(" {} ", status_summary("waiting_user_input", &self.entries)),
                 false,
+                true,
             ),
         ];
         if self.entries.is_empty() {
-            header_chips.push(chip(" no sessions ", true));
+            header_chips.push(chip(" no sessions ", true, false));
         }
         print!(
             "{}",
@@ -998,12 +1002,15 @@ fn status_color_index(status: &str) -> usize {
     }
 }
 
-fn chip(label: &str, selected: bool) -> Text {
+fn chip(label: &str, selected: bool, highlight: bool) -> Text {
     let mut text = Text::new(label).opaque();
     if selected {
         text = text.selected();
     }
-    text.color_range(0, 1..label.chars().count().saturating_sub(1))
+    if highlight {
+        text = text.color_range(0, 1..label.chars().count().saturating_sub(1));
+    }
+    text
 }
 
 fn render_footer(y: usize, cols: usize) {
