@@ -1,6 +1,6 @@
 # falcode-zellij
 
-A Zellij plugin that shows all active AI agent panes across your Zellij sessions in a floating popup. It currently supports [OpenCode](https://opencode.ai), [pi](https://pi.dev), and [Claude Code](https://docs.claude.com/en/docs/claude-code). Jump to any agent pane with a single keystroke, get macOS click-to-focus notifications when an agent finishes or needs your input, and see attention icons on your Zellij tabs.
+A Zellij plugin that shows all active AI agent panes across your Zellij sessions in a floating popup. It currently supports [OpenCode](https://opencode.ai), [pi](https://pi.dev), [oh-my-pi](https://github.com/can1357/oh-my-pi) (omp), and [Claude Code](https://docs.claude.com/en/docs/claude-code). Jump to any agent pane with a single keystroke, get macOS click-to-focus notifications when an agent finishes or needs your input, and see attention icons on your Zellij tabs.
 
 ![falcode-zellij screenshot](assets/screenshot.png)
 
@@ -11,7 +11,7 @@ A Zellij plugin that shows all active AI agent panes across your Zellij sessions
 The plugin has two parts:
 
 1. **Zellij WASM plugin** - the floating popup UI
-2. **A session reporter** - the OpenCode plugin, the pi extension, and/or the Claude Code hook, which report each pane's status and install the editable detection script in the shared state directory
+2. **A session reporter** - the OpenCode plugin, pi extension, oh-my-pi extension, and/or the Claude Code hook, which report each pane's status and install the editable detection script in the shared state directory
 
 ### 1. Download the Zellij plugin
 
@@ -97,7 +97,20 @@ The hook is smart about *which* events deserve your attention:
 
 Set `FALCODE_CLAUDE_HOOK_DEBUG=1` to log raw hook payloads to `~/.local/state/falcode-zellij/claude-hook.log` (auto-truncated at ~256 KiB).
 
-### 2d. Install the notification helper script
+### 2d. Install the oh-my-pi extension
+
+Copy `falcode.ts` to your oh-my-pi extensions directory:
+
+```bash
+mkdir -p ~/.omp/agent/extensions
+curl -L https://raw.githubusercontent.com/victor-falcon/falcode-zellij/main/omp-extension/falcode.ts \
+  -o ~/.omp/agent/extensions/falcode.ts
+```
+
+Then restart oh-my-pi or run `/reload` inside oh-my-pi.
+
+### 2e. Install the notification helper script
+
 
 If you want macOS click-to-focus notifications, also install the helper script into the shared state directory:
 

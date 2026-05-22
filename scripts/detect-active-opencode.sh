@@ -149,18 +149,22 @@ awk -F '\t' -v current_session="$CURRENT_SESSION" -v now_ms="$NOW_MS" -v max_age
     return lower_command == "pi" || lower_command ~ /^pi[[:space:]]/ || lower_command ~ /\/pi$/ || lower_command ~ /\/pi[[:space:]]/ || index(lower_command, "pi-coding-agent")
   }
 
+  function is_omp_command(lower_command) {
+    return lower_command == "omp" || lower_command ~ /^omp[[:space:]]/ || lower_command ~ /\/omp$/ || lower_command ~ /\/omp[[:space:]]/ || index(lower_command, "omp-coding-agent")
+  }
+
   function agent_name(agent) {
-    return agent == "claude" ? "Claude" : agent == "pi" ? "Pi" : "OpenCode"
+    return agent == "claude" ? "Claude" : agent == "pi" ? "Pi" : agent == "omp" ? "OMP" : "OpenCode"
   }
 
   function is_supported_agent(agent) {
-    return agent == "opencode" || agent == "claude" || agent == "pi"
+    return agent == "opencode" || agent == "claude" || agent == "pi" || agent == "omp"
   }
 
   function is_agent_pane(title, command, lower_command, program) {
     lower_command = tolower(command)
     program = command_program(command)
-    return program == "opencode" || program == "claude" || program == "pi" || program == "pi-coding-agent" || index(lower_command, "opencode") || index(lower_command, "claude") || is_pi_command(lower_command)
+    return program == "opencode" || program == "claude" || program == "pi" || program == "omp" || program == "pi-coding-agent" || program == "omp-coding-agent" || index(lower_command, "opencode") || index(lower_command, "claude") || is_pi_command(lower_command) || is_omp_command(lower_command)
   }
 
   function print_entry(session_name, pane_id, pane_title, tab_position, tab_name, status, cwd, updated_at_ms, cwd_json) {
