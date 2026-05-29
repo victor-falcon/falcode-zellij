@@ -15,6 +15,9 @@ const DETECTION_COMMAND_KIND: &str = "detect_active_opencode";
 const DEFAULT_POLL_SECONDS: f64 = 1.0;
 const SESSION_GRACE_MS: u64 = 10_000;
 const ENTRY_MISSING_GRACE_MS: u64 = 5_000;
+/// Reuse cached pane metadata briefly when Zellij omits pane manifests for a
+/// session, but do not trust it for pane existence checks.
+const PANE_CACHE_TTL_MS: u64 = 15_000;
 /// State files older than this are considered stale for non-current sessions.
 /// The companion falcode.js plugin re-writes files every 60 s (heartbeat), so
 /// 3 minutes gives plenty of margin.
@@ -57,7 +60,7 @@ struct State {
     /// smooth over Zellij's intermittent session-list flicker.
     session_last_seen: HashMap<String, u64>,
     entry_last_seen: HashMap<(String, u32), u64>,
-    pane_cache_by_session: HashMap<String, HashMap<u32, PaneDetails>>,
+    pane_cache_by_session: HashMap<String, CachedSessionPanes>,
     stable_pane_mapping: HashMap<String, (String, u32)>,
 }
 
@@ -73,6 +76,12 @@ struct PaneDetails {
     tab_position: usize,
     tab_name: String,
     terminal_command: Option<String>,
+}
+
+#[derive(Clone)]
+struct CachedSessionPanes {
+    updated_at_ms: u64,
+    panes: HashMap<u32, PaneDetails>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -419,14 +428,16 @@ impl State {
             return;
         }
 
-        let pane_lookup = self.refresh_pane_cache(&self.build_pane_lookup());
+        let live_pane_lookup = self.build_pane_lookup();
+        let pane_details_lookup = self.refresh_pane_cache(&live_pane_lookup);
         let tracked_panes = self.read_state_entries_resilient();
 
-        if self.start_detection_request(&pane_lookup, &tracked_panes) {
+        if self.start_detection_request(&live_pane_lookup, &tracked_panes) {
             return;
         }
 
-        let entries = self.detect_entries_from_sources(&pane_lookup, tracked_panes);
+        let entries =
+            self.detect_entries_from_sources(&live_pane_lookup, &pane_details_lookup, tracked_panes);
         self.apply_entries(entries, None);
     }
 
@@ -478,7 +489,7 @@ impl State {
 
     fn start_detection_request(
         &mut self,
-        pane_lookup: &HashMap<(String, u32), PaneDetails>,
+        live_pane_lookup: &HashMap<(String, u32), PaneDetails>,
         tracked_panes: &[StoredPane],
     ) -> bool {
         if self.pending_detection_request_id.is_some() {
@@ -496,7 +507,7 @@ impl State {
         }
 
         if self
-            .write_detection_snapshot(pane_lookup, tracked_panes)
+            .write_detection_snapshot(live_pane_lookup, tracked_panes)
             .is_err()
         {
             return false;
@@ -548,7 +559,7 @@ impl State {
 
     fn write_detection_snapshot(
         &mut self,
-        pane_lookup: &HashMap<(String, u32), PaneDetails>,
+        live_pane_lookup: &HashMap<(String, u32), PaneDetails>,
         tracked_panes: &[StoredPane],
     ) -> Result<(), ()> {
         let now = now_ms();
@@ -559,7 +570,7 @@ impl State {
             let _ = writeln!(contents, "session\t{}", escape_snapshot_field(session_name));
         }
 
-        for ((session_name, pane_id), details) in pane_lookup {
+        for ((session_name, pane_id), details) in live_pane_lookup {
             let terminal_command = details.terminal_command.as_deref().unwrap_or_default();
             let _ = writeln!(
                 contents,
@@ -595,9 +606,10 @@ impl State {
     }
 
     fn detect_entries_locally(&mut self) -> Vec<SessionEntry> {
-        let pane_lookup = self.refresh_pane_cache(&self.build_pane_lookup());
+        let live_pane_lookup = self.build_pane_lookup();
+        let pane_details_lookup = self.refresh_pane_cache(&live_pane_lookup);
         let tracked_panes = self.read_state_entries_resilient();
-        self.detect_entries_from_sources(&pane_lookup, tracked_panes)
+        self.detect_entries_from_sources(&live_pane_lookup, &pane_details_lookup, tracked_panes)
     }
 
     fn build_pane_lookup(&self) -> HashMap<(String, u32), PaneDetails> {
@@ -635,30 +647,42 @@ impl State {
 
     fn refresh_pane_cache(
         &mut self,
-        pane_lookup: &HashMap<(String, u32), PaneDetails>,
+        live_pane_lookup: &HashMap<(String, u32), PaneDetails>,
     ) -> HashMap<(String, u32), PaneDetails> {
-        let mut refreshed_by_session: HashMap<String, HashMap<u32, PaneDetails>> = HashMap::new();
-        for ((session_name, pane_id), details) in pane_lookup {
-            refreshed_by_session
+        let now = now_ms();
+        let mut live_by_session: HashMap<String, HashMap<u32, PaneDetails>> = HashMap::new();
+        for ((session_name, pane_id), details) in live_pane_lookup {
+            live_by_session
                 .entry(session_name.clone())
                 .or_default()
                 .insert(*pane_id, details.clone());
         }
 
+        let mut refreshed_by_session: HashMap<String, CachedSessionPanes> = HashMap::new();
         for session in &self.sessions {
-            if refreshed_by_session.contains_key(session.name.as_str()) {
+            if let Some(panes) = live_by_session.get(session.name.as_str()) {
+                refreshed_by_session.insert(
+                    session.name.clone(),
+                    CachedSessionPanes {
+                        updated_at_ms: now,
+                        panes: panes.clone(),
+                    },
+                );
                 continue;
             }
+
             if let Some(cached) = self.pane_cache_by_session.get(session.name.as_str()) {
-                refreshed_by_session.insert(session.name.clone(), cached.clone());
+                if now.saturating_sub(cached.updated_at_ms) <= PANE_CACHE_TTL_MS {
+                    refreshed_by_session.insert(session.name.clone(), cached.clone());
+                }
             }
         }
 
         self.pane_cache_by_session = refreshed_by_session.clone();
 
         let mut merged_lookup = HashMap::new();
-        for (session_name, panes) in refreshed_by_session {
-            for (pane_id, details) in panes {
+        for (session_name, cached) in refreshed_by_session {
+            for (pane_id, details) in cached.panes {
                 merged_lookup.insert((session_name.clone(), pane_id), details);
             }
         }
@@ -667,11 +691,12 @@ impl State {
 
     fn detect_entries_from_sources(
         &mut self,
-        pane_lookup: &HashMap<(String, u32), PaneDetails>,
+        live_pane_lookup: &HashMap<(String, u32), PaneDetails>,
+        pane_details_lookup: &HashMap<(String, u32), PaneDetails>,
         tracked_panes: Vec<StoredPane>,
     ) -> Vec<SessionEntry> {
         let mut sessions_with_live_panes: HashMap<String, bool> = HashMap::new();
-        for (session_name, _) in pane_lookup.keys() {
+        for (session_name, _) in live_pane_lookup.keys() {
             sessions_with_live_panes.insert(session_name.clone(), true);
         }
 
@@ -732,18 +757,21 @@ impl State {
                 continue;
             }
 
-            // For sessions with live pane data, also require the pane to still
-            // exist — if the pane was closed, the entry should disappear
-            // immediately rather than lingering for the full TTL.
+            // For sessions with live pane data, require the pane to still
+            // exist in the live manifest. Cached pane metadata is only for
+            // display enrichment, never as proof that a pane still exists.
             if sessions_with_live_panes.contains_key(tracked.session_name.as_str())
-                && !pane_lookup.contains_key(&key)
+                && !live_pane_lookup.contains_key(&key)
             {
                 continue;
             }
 
             seen_panes.insert(key.clone(), true);
 
-            if let Some(details) = pane_lookup.get(&key) {
+            if let Some(details) = live_pane_lookup
+                .get(&key)
+                .or_else(|| pane_details_lookup.get(&key))
+            {
                 entries.push(SessionEntry {
                     session_name: tracked.session_name.clone(),
                     pane_id: tracked.pane_id,
@@ -771,7 +799,7 @@ impl State {
             }
         }
 
-        for ((session_name, pane_id), details) in pane_lookup {
+        for ((session_name, pane_id), details) in live_pane_lookup {
             if !is_current(session_name) {
                 continue;
             }
