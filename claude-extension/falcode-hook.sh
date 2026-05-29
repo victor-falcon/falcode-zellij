@@ -39,6 +39,34 @@ if [[ ! -t 0 ]]; then
   STDIN_JSON="$(cat 2>/dev/null || true)"
 fi
 
+# Temporary debug log of raw hook payloads. Remove once Notification flavors
+# are well-characterized. Capped at ~256 KiB to avoid runaway growth.
+DEBUG_LOG="$STATE_ROOT/claude-hook.log"
+if [[ ${FALCODE_CLAUDE_HOOK_DEBUG:-1} != "0" ]]; then
+  if [[ -f $DEBUG_LOG ]] && [[ $(wc -c <"$DEBUG_LOG" 2>/dev/null || echo 0) -gt 262144 ]]; then
+    rm -f "$DEBUG_LOG"
+  fi
+  {
+    printf -- '--- %s event=%s session=%s pane=%s\n' \
+      "$(date -u +%FT%TZ)" "$EVENT" "$SESSION_NAME" "$PANE_ID"
+    printf '%s\n' "$STDIN_JSON"
+  } >>"$DEBUG_LOG" 2>/dev/null || true
+fi
+
+# Extract the message field from the JSON payload (Notification only).
+hook_message() {
+  python3 -c '
+import json, sys
+try:
+    data = json.loads(sys.stdin.read())
+except Exception:
+    sys.exit(0)
+msg = data.get("message")
+if isinstance(msg, str):
+    print(msg)
+' 2>/dev/null
+}
+
 # SessionEnd: drop the state file so the popup stops listing this pane.
 if [[ $EVENT == "SessionEnd" ]]; then
   rm -f "$STATE_FILE"
@@ -53,12 +81,18 @@ case "$EVENT" in
     STATUS="working"
     ;;
   Notification)
-    # Claude fires Notification both for permission prompts and 60s input
-    # idle. Only the permission flavor should pop a notification.
-    if [[ -n $STDIN_JSON ]] && grep -qi 'permission' <<<"$STDIN_JSON"; then
+    # Claude fires Notification for permission prompts AND for non-permission
+    # cases like the 60s input-idle reminder or in-chat questions. Inspect
+    # the message field (not the whole JSON; keys like `permission_mode`
+    # used to cause false positives).
+    notification_message=""
+    if [[ -n $STDIN_JSON ]]; then
+      notification_message="$(hook_message <<<"$STDIN_JSON")"
+    fi
+    if grep -qiE 'needs your permission|permission to use' <<<"$notification_message"; then
       STATUS="asking_permissions"
     else
-      STATUS="waiting_user_input"
+      STATUS="waiting_user_answers"
     fi
     ;;
   Stop)
@@ -114,8 +148,8 @@ fi
 if [[ ${FALCODE_DISABLE_ATTENTION:-} != "1" ]]; then
   was_active=0
   is_active=0
-  case "$PREV_STATUS" in working|asking_permissions) was_active=1;; esac
-  case "$STATUS"      in working|asking_permissions) is_active=1;;  esac
+  case "$PREV_STATUS" in working|asking_permissions|waiting_user_answers) was_active=1;; esac
+  case "$STATUS"      in working|asking_permissions|waiting_user_answers) is_active=1;;  esac
   attention_event=""
   if [[ $was_active -eq 0 && $is_active -eq 1 ]]; then
     attention_event="${FALCODE_ATTENTION_ENTER_EVENT:-waiting}"
@@ -133,8 +167,11 @@ case "$STATUS" in
   asking_permissions)
     notify_status="permission"
     ;;
+  waiting_user_answers)
+    notify_status="question"
+    ;;
   waiting_user_input)
-    case "$PREV_STATUS" in working|asking_permissions) notify_status="idle";; esac
+    case "$PREV_STATUS" in working|asking_permissions|waiting_user_answers) notify_status="idle";; esac
     ;;
 esac
 
