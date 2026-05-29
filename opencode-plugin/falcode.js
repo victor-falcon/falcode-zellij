@@ -373,6 +373,46 @@ function notificationStatusFor(newStatus, prevStatus) {
   return null;
 }
 
+const ATTENTION_ACTIVE_STATES = new Set([
+  "working",
+  "asking_permissions",
+  "waiting_user_answers",
+]);
+
+/**
+ * Send a zellij-attention pipe so the tab name gets an icon appended.
+ * Icons themselves are configured in the zellij-attention plugin kdl block
+ * (waiting_icon / completed_icon). Event names can be remapped via
+ * FALCODE_ATTENTION_ENTER_EVENT / FALCODE_ATTENTION_EXIT_EVENT.
+ * Disabled entirely with FALCODE_DISABLE_ATTENTION=1.
+ */
+function sendAttentionPipe(event, paneId) {
+  if (Bun.env.FALCODE_DISABLE_ATTENTION === "1") return;
+  if (!event || paneId == null) return;
+  try {
+    const child = spawn(
+      "zellij",
+      ["pipe", "--name", `zellij-attention::${event}::${paneId}`],
+      { detached: true, stdio: "ignore" },
+    );
+    child.unref();
+  } catch {
+    // Best-effort: zellij-attention plugin may not be installed.
+  }
+}
+
+function attentionEventFor(newStatus, prevStatus) {
+  const wasActive = ATTENTION_ACTIVE_STATES.has(prevStatus);
+  const isActive = ATTENTION_ACTIVE_STATES.has(newStatus);
+  if (!wasActive && isActive) {
+    return Bun.env.FALCODE_ATTENTION_ENTER_EVENT ?? "waiting";
+  }
+  if (wasActive && !isActive) {
+    return Bun.env.FALCODE_ATTENTION_EXIT_EVENT ?? "completed";
+  }
+  return null;
+}
+
 function fireNotification({ notifyScript, agent, status, sessionName, paneId, cwd }) {
   if (!notifyScript) return;
   const displayName = cwd ? path.basename(cwd) : agent === "pi" ? "Pi" : "OpenCode";
@@ -468,6 +508,10 @@ export default async (_input) => {
     // Only notify on genuine transitions after initial plugin setup.
     // Initial state bootstrap and heartbeat re-writes must stay silent.
     if (!initialized || status === prevStatus) return;
+    const attentionEvent = attentionEventFor(status, prevStatus);
+    if (attentionEvent) {
+      sendAttentionPipe(attentionEvent, Number.parseInt(paneId, 10));
+    }
     const notifyStatus = notificationStatusFor(status, prevStatus);
     if (!notifyStatus) return;
     fireNotification({
