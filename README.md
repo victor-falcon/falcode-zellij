@@ -1,6 +1,6 @@
 # falcode-zellij
 
-A Zellij plugin that shows all active AI agent panes across your Zellij sessions in a floating popup. It currently supports [OpenCode](https://opencode.ai), [pi](https://pi.dev), and Claude-detected panes. Jump to any agent pane with a single keystroke.
+A Zellij plugin that shows all active AI agent panes across your Zellij sessions in a floating popup. It currently supports [OpenCode](https://opencode.ai), [pi](https://pi.dev), and [Claude Code](https://docs.claude.com/en/docs/claude-code). Jump to any agent pane with a single keystroke.
 
 ![falcode-zellij screenshot](assets/screenshot.png)
 
@@ -11,7 +11,7 @@ A Zellij plugin that shows all active AI agent panes across your Zellij sessions
 The plugin has two parts:
 
 1. **Zellij WASM plugin** - the floating popup UI
-2. **A session reporter** - either the OpenCode plugin and/or the pi extension, which report each pane's status and install the editable detection script in the shared state directory
+2. **A session reporter** - the OpenCode plugin, the pi extension, and/or the Claude Code hook, which report each pane's status and install the editable detection script in the shared state directory
 
 ### 1. Download the Zellij plugin
 
@@ -58,7 +58,38 @@ curl -L https://raw.githubusercontent.com/victor-falcon/falcode-zellij/main/pi-e
 
 Then restart pi or run `/reload` inside pi.
 
-### 2c. Install the notification helper script
+### 2c. Install the Claude Code hook
+
+Claude Code uses hooks instead of a runtime plugin. Copy the hook script into the shared state directory and register it in your Claude Code settings.
+
+```bash
+mkdir -p ~/.local/state/falcode-zellij
+curl -L https://raw.githubusercontent.com/victor-falcon/falcode-zellij/main/claude-extension/falcode-hook.sh \
+  -o ~/.local/state/falcode-zellij/falcode-hook.sh
+chmod +x ~/.local/state/falcode-zellij/falcode-hook.sh
+```
+
+Then add the following block to `~/.claude/settings.json` (merge with any existing `hooks` you have):
+
+```json
+{
+  "hooks": {
+    "SessionStart":     [{ "hooks": [{ "type": "command", "command": "/Users/__YOUR_HOME__/.local/state/falcode-zellij/falcode-hook.sh SessionStart" }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "/Users/__YOUR_HOME__/.local/state/falcode-zellij/falcode-hook.sh UserPromptSubmit" }] }],
+    "PreToolUse":       [{ "hooks": [{ "type": "command", "command": "/Users/__YOUR_HOME__/.local/state/falcode-zellij/falcode-hook.sh PreToolUse" }] }],
+    "PostToolUse":      [{ "hooks": [{ "type": "command", "command": "/Users/__YOUR_HOME__/.local/state/falcode-zellij/falcode-hook.sh PostToolUse" }] }],
+    "Notification":     [{ "hooks": [{ "type": "command", "command": "/Users/__YOUR_HOME__/.local/state/falcode-zellij/falcode-hook.sh Notification" }] }],
+    "Stop":             [{ "hooks": [{ "type": "command", "command": "/Users/__YOUR_HOME__/.local/state/falcode-zellij/falcode-hook.sh Stop" }] }],
+    "SessionEnd":       [{ "hooks": [{ "type": "command", "command": "/Users/__YOUR_HOME__/.local/state/falcode-zellij/falcode-hook.sh SessionEnd" }] }]
+  }
+}
+```
+
+Replace `__YOUR_HOME__` with your actual home directory (Claude Code does not expand `~` inside hook commands).
+
+The hook reads `ZELLIJ_PANE_ID` / `ZELLIJ_SESSION_NAME` from the environment, so panes opened outside Zellij are a no-op. Status transitions are surfaced as macOS notifications and `zellij-attention` pipes just like the OpenCode and pi integrations.
+
+### 2d. Install the notification helper script
 
 If you want macOS click-to-focus notifications, also install the helper script into the shared state directory:
 
@@ -109,8 +140,54 @@ The popup now requests Zellij's `Run commands` permission as well, because it ex
 
 If a macOS notification click does not focus the expected pane/session, check:
 
-- `~/.local/state/falcode-zellij/notification-clicks.log` — notification creation + click/focus attempts, including zellij command output and post-checks.
+- `~/.local/state/falcode-zellij/notification-clicks.log` — notification creation + click/focus attempts, including Ghostty activation details, primary/fallback zellij commands, session client snapshots before/after, and post-checks.
 - `~/.local/state/falcode-zellij/terminal-notifier.log` — raw `terminal-notifier` output.
+
+## Tab attention icons (optional)
+
+Integrates with [KiryuuLight/zellij-attention](https://github.com/KiryuuLight/zellij-attention) so the tab name gets an icon appended while an agent is working (⏳) and when it finishes (✅). Focusing the pane clears the icon automatically.
+
+### 1. Install zellij-attention
+
+```bash
+mkdir -p ~/.config/zellij/plugins
+curl -L https://github.com/KiryuuLight/zellij-attention/releases/latest/download/zellij-attention.wasm \
+  -o ~/.config/zellij/plugins/zellij-attention.wasm
+```
+
+### 2. Load it from `~/.config/zellij/config.kdl`
+
+```kdl
+load_plugins {
+    "file:~/.config/zellij/plugins/zellij-attention.wasm" {
+        enabled "true"
+        waiting_icon "⏳"     // shown while agent is working
+        completed_icon "✅"   // shown when agent finishes
+    }
+}
+```
+
+Restart Zellij. Icons are configured here — change `waiting_icon` / `completed_icon` to any character or emoji.
+
+### How it works
+
+The OpenCode plugin / pi extension / Claude Code hook broadcasts a `zellij pipe --name "zellij-attention::<event>::<pane_id>"` on agent state transitions:
+
+| Transition | Event sent | Default icon |
+|---|---|---|
+| idle → working / asking permission / question | `waiting` | ⏳ |
+| working / asking permission / question → idle | `completed` | ✅ |
+| Pane focused | _(cleared by zellij-attention)_ | — |
+
+If zellij-attention isn't installed, the pipe is a harmless no-op.
+
+### Environment overrides
+
+| Variable | Effect |
+|---|---|
+| `FALCODE_DISABLE_ATTENTION=1` | Disable attention pipes entirely |
+| `FALCODE_ATTENTION_ENTER_EVENT` | Event name on enter-active (default `waiting`) |
+| `FALCODE_ATTENTION_EXIT_EVENT` | Event name on exit-active (default `completed`) |
 
 ## Usage
 
@@ -135,7 +212,7 @@ The compiled plugin will be at `target/wasm32-wasip1/release/falcode-zellij-sess
 
 ### Automated local install
 
-For development, the install script builds the WASM plugin, symlinks the OpenCode plugin, the pi extension, the detection script, and the notification helper into their expected locations, and registers the OpenCode plugin in your config:
+For development, the install script builds the WASM plugin, symlinks the OpenCode plugin, the pi extension, the Claude Code hook, the detection script, and the notification helper into their expected locations, and registers the OpenCode plugin and the Claude Code hooks in their respective config files:
 
 ```bash
 python3 scripts/install.py
