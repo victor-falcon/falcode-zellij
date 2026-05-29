@@ -27,6 +27,9 @@ LOG_FILE="$STATE_DIR/notification-clicks.log"
 NOTIFIER_LOG_FILE="$STATE_DIR/terminal-notifier.log"
 ATTACHED_SESSION=""
 ATTACHED_SESSION_SCAN=""
+GHOSTTY_ACTIVATION_METHOD=""
+GHOSTTY_ACTIVATION_STATUS=1
+GHOSTTY_ACTIVATION_OUTPUT=""
 
 ensure_log_dir() {
   mkdir -p "$STATE_DIR" 2>/dev/null || true
@@ -72,6 +75,22 @@ run_capture() {
   return "$rc"
 }
 
+capture_session_clients() {
+  local session_name="$1"
+  local __output_var_name="$2"
+  local __status_var_name="$3"
+  local output rc
+
+  if run_capture output "$ZELLIJ_BIN" -s "$session_name" action list-clients; then
+    rc=0
+  else
+    rc=$?
+  fi
+
+  printf -v "$__output_var_name" '%s' "$output"
+  printf -v "$__status_var_name" '%s' "$rc"
+}
+
 focus_already_satisfied() {
   local output="$1"
   grep -Fq "already focused" <<<"$output"
@@ -87,11 +106,114 @@ output_mentions_target_pane() {
   grep -Eq "(^|[[:space:]])(${expected_pane_id}|terminal_${expected_pane_id})([[:space:]]|$)" <<<"$output"
 }
 
-activate_ghostty() {
-  if [[ -x /usr/bin/osascript ]]; then
-    /usr/bin/osascript -e 'tell application "Ghostty" to activate' >/dev/null 2>&1 && return 0
+extract_session_clients_from_scan() {
+  local session_scan="$1"
+  local target_session="$2"
+  local __output_var_name="$3"
+  local __status_var_name="$4"
+  local block output status found
+
+  block="$(awk -v target="session=${target_session}" '
+    $0 == target { in_block = 1; next }
+    in_block && /^session=/ { exit }
+    in_block { print }
+  ' <<<"$session_scan")"
+
+  output=""
+  status="1"
+  found=1
+
+  if [[ -n $block ]]; then
+    found=0
+    status="$(sed -n 's/^clients_status=//p' <<<"$block" | head -n 1)"
+    output="$(awk '
+      /^clients_output:$/ { capture = 1; next }
+      capture { print }
+    ' <<<"$block")"
+    [[ -z $status ]] && status="1"
   fi
-  [[ -x /usr/bin/open ]] && /usr/bin/open -a Ghostty >/dev/null 2>&1 || true
+
+  printf -v "$__output_var_name" '%s' "$output"
+  printf -v "$__status_var_name" '%s' "$status"
+  return "$found"
+}
+
+confirm_target_focus() {
+  local session_scan="$1"
+  local target_session="$2"
+  local expected_pane_id="$3"
+  local __scan_output_var_name="$4"
+  local __scan_status_var_name="$5"
+  local __confirmed_var_name="$6"
+  local scan_output scan_status confirmed extracted_from_scan
+
+  extracted_from_scan=1
+  if extract_session_clients_from_scan "$session_scan" "$target_session" scan_output scan_status; then
+    extracted_from_scan=0
+  else
+    capture_session_clients "$target_session" scan_output scan_status
+  fi
+
+  confirmed=0
+  if [[ $scan_status -eq 0 ]] && output_mentions_target_pane "$scan_output" "$expected_pane_id"; then
+    confirmed=1
+  fi
+
+  if [[ $confirmed -eq 0 && $extracted_from_scan -eq 0 && -z $scan_output ]]; then
+    capture_session_clients "$target_session" scan_output scan_status
+    if [[ $scan_status -eq 0 ]] && output_mentions_target_pane "$scan_output" "$expected_pane_id"; then
+      confirmed=1
+    fi
+  fi
+
+  printf -v "$__scan_output_var_name" '%s' "$scan_output"
+  printf -v "$__scan_status_var_name" '%s' "$scan_status"
+  printf -v "$__confirmed_var_name" '%s' "$confirmed"
+}
+
+activate_ghostty() {
+  local output=""
+  local rc=1
+  local notes=""
+
+  GHOSTTY_ACTIVATION_METHOD="none"
+  GHOSTTY_ACTIVATION_STATUS=1
+  GHOSTTY_ACTIVATION_OUTPUT=""
+
+  if [[ -x /usr/bin/osascript ]]; then
+    if run_capture output /usr/bin/osascript -e 'tell application "Ghostty" to activate'; then
+      GHOSTTY_ACTIVATION_METHOD="osascript"
+      GHOSTTY_ACTIVATION_STATUS=0
+      GHOSTTY_ACTIVATION_OUTPUT="$output"
+      return 0
+    else
+      rc=$?
+      notes+="osascript_exit_status=${rc}"$'\n'
+      notes+="osascript_output:"$'\n'"${output}"$'\n'
+    fi
+  else
+    notes+="osascript_missing=1"$'\n'
+  fi
+
+  if [[ -x /usr/bin/open ]]; then
+    if run_capture output /usr/bin/open -a Ghostty; then
+      GHOSTTY_ACTIVATION_METHOD="open"
+      GHOSTTY_ACTIVATION_STATUS=0
+      GHOSTTY_ACTIVATION_OUTPUT="${notes}open_output:"$'\n'"${output}"
+      return 0
+    else
+      rc=$?
+      notes+="open_exit_status=${rc}"$'\n'
+      notes+="open_output:"$'\n'"${output}"$'\n'
+    fi
+  else
+    notes+="open_missing=1"$'\n'
+  fi
+
+  GHOSTTY_ACTIVATION_METHOD="failed"
+  GHOSTTY_ACTIVATION_STATUS="$rc"
+  GHOSTTY_ACTIVATION_OUTPUT="$notes"
+  return 1
 }
 
 find_attached_session() {
@@ -164,22 +286,48 @@ if [[ $focus_now -eq 1 ]]; then
   attempt_count=0
   attached_session=""
   attached_session_scan=""
+  attached_session_clients_before_output=""
+  attached_session_clients_before_status=1
+  attached_session_clients_after_output=""
+  attached_session_clients_after_status=1
   post_attached_session=""
   post_attached_session_scan=""
+  target_clients_before_output=""
+  target_clients_before_status=1
   target_clients_output=""
   target_clients_status=1
+  target_confirmed=0
   focus_mode=""
-  focus_cmd=()
-  action_output=""
-  action_status=1
+  focus_command=""
+  focus_command_output=""
+  focus_command_exit_status=1
+  fallback_mode=""
+  fallback_command=""
+  fallback_command_output=""
+  fallback_command_exit_status=1
+  fallback_followup_command=""
+  fallback_followup_command_output=""
+  fallback_followup_command_exit_status=1
   worked="unknown"
   what_happened="notification click did not produce a confirmed focus"
+  ghostty_activation_method=""
+  ghostty_activation_status=1
+  ghostty_activation_output=""
 
-  for attempt in 1 2 3 4 5; do
+  for attempt in 1 2 3; do
     attempt_count=$attempt
 
-    activate_ghostty
-    sleep 0.2
+    case "$attempt" in
+      1) activation_settle_delay=0.08; post_action_delay=0.12 ;;
+      2) activation_settle_delay=0.15; post_action_delay=0.18 ;;
+      *) activation_settle_delay=0.25; post_action_delay=0.25 ;;
+    esac
+
+    activate_ghostty || true
+    ghostty_activation_method="$GHOSTTY_ACTIVATION_METHOD"
+    ghostty_activation_status="$GHOSTTY_ACTIVATION_STATUS"
+    ghostty_activation_output="$GHOSTTY_ACTIVATION_OUTPUT"
+    sleep "$activation_settle_delay"
 
     attached_session=""
     attached_session_scan=""
@@ -188,20 +336,35 @@ if [[ $focus_now -eq 1 ]]; then
     fi
     attached_session_scan="$ATTACHED_SESSION_SCAN"
 
+    attached_session_clients_before_output=""
+    attached_session_clients_before_status=1
+    if [[ -n $attached_session ]]; then
+      capture_session_clients "$attached_session" attached_session_clients_before_output attached_session_clients_before_status
+    fi
+
+    capture_session_clients "$session" target_clients_before_output target_clients_before_status
+
     focus_mode="direct-focus"
-    focus_cmd=("$ZELLIJ_BIN" -s "$session" action focus-pane-id "$target_pane")
+    focus_command_output=""
+    focus_command_exit_status=1
     if [[ -n $attached_session && $attached_session != "$session" ]]; then
-      focus_mode="switch-session"
-      focus_cmd=("$ZELLIJ_BIN" -s "$attached_session" action switch-session "$session" --pane-id "$target_pane")
-    fi
-
-    if action_output="$("${focus_cmd[@]}" 2>&1)"; then
-      action_status=0
+      focus_mode="switch-session-with-pane"
+      if run_capture focus_command_output "$ZELLIJ_BIN" -s "$attached_session" action switch-session "$session" --pane-id "$target_pane"; then
+        focus_command_exit_status=0
+      else
+        focus_command_exit_status=$?
+      fi
+      focus_command="$(command_to_string "$ZELLIJ_BIN" -s "$attached_session" action switch-session "$session" --pane-id "$target_pane")"
     else
-      action_status=$?
+      if run_capture focus_command_output "$ZELLIJ_BIN" -s "$session" action focus-pane-id "$target_pane"; then
+        focus_command_exit_status=0
+      else
+        focus_command_exit_status=$?
+      fi
+      focus_command="$(command_to_string "$ZELLIJ_BIN" -s "$session" action focus-pane-id "$target_pane")"
     fi
 
-    sleep 0.25
+    sleep "$post_action_delay"
 
     post_attached_session=""
     post_attached_session_scan=""
@@ -210,32 +373,143 @@ if [[ $focus_now -eq 1 ]]; then
     fi
     post_attached_session_scan="$ATTACHED_SESSION_SCAN"
 
-    if run_capture target_clients_output "$ZELLIJ_BIN" -s "$session" action list-clients; then
-      target_clients_status=0
-    else
-      target_clients_status=$?
+    attached_session_clients_after_output=""
+    attached_session_clients_after_status=1
+    if [[ -n $post_attached_session ]]; then
+      capture_session_clients "$post_attached_session" attached_session_clients_after_output attached_session_clients_after_status
+    fi
+
+    confirm_target_focus "$post_attached_session_scan" "$session" "$pane_id" target_clients_output target_clients_status target_confirmed
+
+    fallback_mode=""
+    fallback_command=""
+    fallback_command_output=""
+    fallback_command_exit_status=1
+    fallback_followup_command=""
+    fallback_followup_command_output=""
+    fallback_followup_command_exit_status=1
+
+    if [[ $target_confirmed -ne 1 && -n $attached_session && $attached_session != "$session" ]]; then
+      fallback_source_session="$post_attached_session"
+      [[ -z $fallback_source_session ]] && fallback_source_session="$attached_session"
+
+      if [[ -n $fallback_source_session && $fallback_source_session != "$session" ]]; then
+        fallback_mode="switch-session-then-focus"
+
+        if run_capture fallback_command_output "$ZELLIJ_BIN" -s "$fallback_source_session" action switch-session "$session"; then
+          fallback_command_exit_status=0
+        else
+          fallback_command_exit_status=$?
+        fi
+        fallback_command="$(command_to_string "$ZELLIJ_BIN" -s "$fallback_source_session" action switch-session "$session")"
+
+        sleep "$post_action_delay"
+
+        post_attached_session=""
+        post_attached_session_scan=""
+        if find_attached_session; then
+          post_attached_session="$ATTACHED_SESSION"
+        fi
+        post_attached_session_scan="$ATTACHED_SESSION_SCAN"
+
+        attached_session_clients_after_output=""
+        attached_session_clients_after_status=1
+        if [[ -n $post_attached_session ]]; then
+          capture_session_clients "$post_attached_session" attached_session_clients_after_output attached_session_clients_after_status
+        fi
+
+        confirm_target_focus "$post_attached_session_scan" "$session" "$pane_id" target_clients_output target_clients_status target_confirmed
+      fi
+
+      if [[ $target_confirmed -ne 1 ]]; then
+        if run_capture fallback_followup_command_output "$ZELLIJ_BIN" -s "$session" action focus-pane-id "$target_pane"; then
+          fallback_followup_command_exit_status=0
+        else
+          fallback_followup_command_exit_status=$?
+        fi
+        fallback_followup_command="$(command_to_string "$ZELLIJ_BIN" -s "$session" action focus-pane-id "$target_pane")"
+
+        sleep "$post_action_delay"
+
+        post_attached_session=""
+        post_attached_session_scan=""
+        if find_attached_session; then
+          post_attached_session="$ATTACHED_SESSION"
+        fi
+        post_attached_session_scan="$ATTACHED_SESSION_SCAN"
+
+        attached_session_clients_after_output=""
+        attached_session_clients_after_status=1
+        if [[ -n $post_attached_session ]]; then
+          capture_session_clients "$post_attached_session" attached_session_clients_after_output attached_session_clients_after_status
+        fi
+
+        confirm_target_focus "$post_attached_session_scan" "$session" "$pane_id" target_clients_output target_clients_status target_confirmed
+
+        if [[ $target_confirmed -eq 1 ]]; then
+          focus_mode="switch-session-then-focus"
+          focus_command="$fallback_followup_command"
+          focus_command_output="$fallback_followup_command_output"
+          focus_command_exit_status="$fallback_followup_command_exit_status"
+        fi
+      elif [[ $fallback_command_exit_status -eq 0 ]]; then
+        focus_mode="switch-session-only"
+        focus_command="$fallback_command"
+        focus_command_output="$fallback_command_output"
+        focus_command_exit_status="$fallback_command_exit_status"
+      fi
     fi
 
     attempts_log+="attempt=${attempt}"$'\n'
+    attempts_log+="activation_settle_delay=${activation_settle_delay}"$'\n'
+    attempts_log+="post_action_delay=${post_action_delay}"$'\n'
+    attempts_log+="ghostty_activation_method=${ghostty_activation_method}"$'\n'
+    attempts_log+="ghostty_activation_status=${ghostty_activation_status}"$'\n'
+    attempts_log+="ghostty_activation_output:"$'\n'"${ghostty_activation_output}"$'\n'
     attempts_log+="attached_session_before=${attached_session}"$'\n'
+    attempts_log+="attached_session_clients_before_exit_status=${attached_session_clients_before_status}"$'\n'
+    attempts_log+="attached_session_clients_before_output:"$'\n'"${attached_session_clients_before_output}"$'\n'
+    attempts_log+="target_session_list_clients_before_exit_status=${target_clients_before_status}"$'\n'
+    attempts_log+="target_session_list_clients_before_output:"$'\n'"${target_clients_before_output}"$'\n'
     attempts_log+="focus_mode=${focus_mode}"$'\n'
-    attempts_log+="focus_command=$(command_to_string "${focus_cmd[@]}")"$'\n'
-    attempts_log+="focus_command_exit_status=${action_status}"$'\n'
-    attempts_log+="focus_command_output:"$'\n'"${action_output}"$'\n'
+    attempts_log+="focus_command=${focus_command}"$'\n'
+    attempts_log+="focus_command_exit_status=${focus_command_exit_status}"$'\n'
+    attempts_log+="focus_command_output:"$'\n'"${focus_command_output}"$'\n'
+    attempts_log+="fallback_mode=${fallback_mode}"$'\n'
+    attempts_log+="fallback_command=${fallback_command}"$'\n'
+    attempts_log+="fallback_command_exit_status=${fallback_command_exit_status}"$'\n'
+    attempts_log+="fallback_command_output:"$'\n'"${fallback_command_output}"$'\n'
+    attempts_log+="fallback_followup_command=${fallback_followup_command}"$'\n'
+    attempts_log+="fallback_followup_command_exit_status=${fallback_followup_command_exit_status}"$'\n'
+    attempts_log+="fallback_followup_command_output:"$'\n'"${fallback_followup_command_output}"$'\n'
     attempts_log+="attached_session_after=${post_attached_session}"$'\n'
+    attempts_log+="attached_session_clients_after_exit_status=${attached_session_clients_after_status}"$'\n'
+    attempts_log+="attached_session_clients_after_output:"$'\n'"${attached_session_clients_after_output}"$'\n'
     attempts_log+="target_session_list_clients_exit_status=${target_clients_status}"$'\n'
     attempts_log+="target_session_list_clients_output:"$'\n'"${target_clients_output}"$'\n'
-
-    target_confirmed=0
-    if [[ $target_clients_status -eq 0 ]] && output_mentions_target_pane "$target_clients_output" "$pane_id"; then
-      target_confirmed=1
-    fi
+    attempts_log+="target_confirmed=${target_confirmed}"$'\n'
 
     if [[ $target_confirmed -eq 1 ]]; then
       worked="yes"
-      if [[ $action_status -eq 0 ]]; then
-        what_happened="target pane showed up in target session client list after click"
-      elif focus_already_satisfied "$action_output"; then
+      if [[ $focus_command_exit_status -eq 0 ]]; then
+        case "$focus_mode" in
+          direct-focus)
+            what_happened="target pane was focused directly after click"
+            ;;
+          switch-session-with-pane)
+            what_happened="target session switched and target pane showed up after click"
+            ;;
+          switch-session-only)
+            what_happened="switch-session without --pane-id succeeded after the initial command stalled"
+            ;;
+          switch-session-then-focus)
+            what_happened="fallback switch-session plus explicit focus-pane-id recovered the click"
+            ;;
+          *)
+            what_happened="target pane showed up in target session client list after click"
+            ;;
+        esac
+      elif focus_already_satisfied "$focus_command_output"; then
         what_happened="target pane was already focused when the click handler ran"
       else
         what_happened="target pane was confirmed after click despite a non-zero focus command exit status"
@@ -243,9 +517,12 @@ if [[ $focus_now -eq 1 ]]; then
       break
     fi
 
-    if [[ $action_status -ne 0 ]]; then
+    if [[ $focus_command_exit_status -ne 0 ]]; then
       worked="no"
-      what_happened="focus command failed with exit status ${action_status}"
+      what_happened="primary focus command failed with exit status ${focus_command_exit_status}"
+    elif [[ -n $fallback_command && $fallback_command_exit_status -ne 0 ]]; then
+      worked="no"
+      what_happened="fallback switch-session command failed with exit status ${fallback_command_exit_status}"
     elif [[ -n $post_attached_session && $post_attached_session == "$session" ]]; then
       worked="maybe"
       what_happened="attached client moved to target session, but target pane could not be confirmed"
@@ -254,7 +531,7 @@ if [[ $focus_now -eq 1 ]]; then
       what_happened="focus command exited 0, but target session list-clients failed with ${target_clients_status}"
     else
       worked="unknown"
-      what_happened="focus command exited 0, but post-check did not confirm the target pane"
+      what_happened="focus command sequence exited 0, but post-check did not confirm the target pane"
     fi
   done
 
@@ -266,16 +543,33 @@ if [[ $focus_now -eq 1 ]]; then
     "target_pane_arg" "$target_pane" \
     "attempt_count" "$attempt_count" \
     "attempts_log" "$attempts_log" \
+    "ghostty_activation_method" "$ghostty_activation_method" \
+    "ghostty_activation_status" "$ghostty_activation_status" \
+    "ghostty_activation_output" "$ghostty_activation_output" \
     "attached_session_before" "$attached_session" \
     "attached_session_scan_before" "$attached_session_scan" \
+    "attached_session_clients_before_exit_status" "$attached_session_clients_before_status" \
+    "attached_session_clients_before_output" "$attached_session_clients_before_output" \
+    "target_session_list_clients_before_exit_status" "$target_clients_before_status" \
+    "target_session_list_clients_before_output" "$target_clients_before_output" \
     "focus_mode" "$focus_mode" \
-    "focus_command" "$(command_to_string "${focus_cmd[@]}")" \
-    "focus_command_exit_status" "$action_status" \
-    "focus_command_output" "$action_output" \
+    "focus_command" "$focus_command" \
+    "focus_command_exit_status" "$focus_command_exit_status" \
+    "focus_command_output" "$focus_command_output" \
+    "fallback_mode" "$fallback_mode" \
+    "fallback_command" "$fallback_command" \
+    "fallback_command_exit_status" "$fallback_command_exit_status" \
+    "fallback_command_output" "$fallback_command_output" \
+    "fallback_followup_command" "$fallback_followup_command" \
+    "fallback_followup_command_exit_status" "$fallback_followup_command_exit_status" \
+    "fallback_followup_command_output" "$fallback_followup_command_output" \
     "attached_session_after" "$post_attached_session" \
     "attached_session_scan_after" "$post_attached_session_scan" \
+    "attached_session_clients_after_exit_status" "$attached_session_clients_after_status" \
+    "attached_session_clients_after_output" "$attached_session_clients_after_output" \
     "target_session_list_clients_exit_status" "$target_clients_status" \
     "target_session_list_clients_output" "$target_clients_output" \
+    "target_confirmed" "$target_confirmed" \
     "worked" "$worked" \
     "what_happened" "$what_happened"
 
