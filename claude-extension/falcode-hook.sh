@@ -68,6 +68,21 @@ if isinstance(val, str):
 ' "$1" 2>/dev/null
 }
 
+# Exit 0 iff the named top-level field is a non-empty JSON array. Used on Stop to
+# tell a genuine "agent finished" apart from a transient stop where the session
+# is only paused waiting for background work or a scheduled wakeup to resume it.
+hook_array_nonempty() {
+  python3 -c '
+import json, sys
+try:
+    data = json.loads(sys.stdin.read())
+except Exception:
+    sys.exit(1)
+val = data.get(sys.argv[1])
+sys.exit(0 if isinstance(val, list) and len(val) > 0 else 1)
+' "$1" 2>/dev/null
+}
+
 # SessionEnd: drop the state file so the popup stops listing this pane.
 if [[ $EVENT == "SessionEnd" ]]; then
   rm -f "$STATE_FILE"
@@ -128,6 +143,26 @@ case "$EVENT" in
     esac
     ;;
   Stop)
+    # Stop fires at the end of EVERY assistant turn, but not every turn means
+    # "the agent finished, your turn". When the session is only paused — waiting
+    # for backgrounded work to wake it, or for a scheduled wakeup to fire — the
+    # idle notification is spurious (and for short-interval loops, fires every
+    # tick). Claude Code (>=2.1.145) exposes two arrays in the Stop payload for
+    # exactly this, each empty only when nothing is in flight:
+    #   background_tasks -> run_in_background Bash / backgrounded subagents /
+    #                       Monitor: "session paused waiting to be woken".
+    #   session_crons    -> CronCreate / ScheduleWakeup / /loop wakeups pending.
+    # Either non-empty => transient stop. Exit before touching state so the pane
+    # keeps its prior "working" status and the real idle notification still fires
+    # on the final Stop (both lists empty).
+    # Trade-off: a long-lived background process the agent left running (e.g. a
+    # dev server) keeps background_tasks non-empty, so the genuine idle ping is
+    # suppressed for that session until the process exits.
+    if [[ -n $STDIN_JSON ]] \
+       && { hook_array_nonempty background_tasks <<<"$STDIN_JSON" \
+            || hook_array_nonempty session_crons <<<"$STDIN_JSON"; }; then
+      exit 0
+    fi
     STATUS="waiting_user_input"
     ;;
   *)
