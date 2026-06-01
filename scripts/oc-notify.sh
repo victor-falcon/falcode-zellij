@@ -10,7 +10,10 @@ Usage: oc-notify.sh --agent <agent> --pane-name <name> --status <status> --sessi
 
 Notification flags (all required):
   --agent      Agent identifier (e.g. opencode | pi | claude).
-  --pane-name  Raw zellij pane title; leading known agent prefixes are stripped for display.
+  --pane-name  Folder/agent label used as the heading fallback when the pane carries
+               no conversation title; leading known agent prefixes are stripped.
+  --pane-title Live conversation title the agent gave the pane (optional). When
+               absent, falls back to the detection snapshot, then to --pane-name.
   --status     Free-form status string (e.g. idle | permission | question).
                Validation is the caller's responsibility.
   --session    Zellij session name.
@@ -25,6 +28,7 @@ EOF
 STATE_DIR="${FALCODE_STATE_DIR:-${HOME:-.}/.local/state/falcode-zellij}"
 LOG_FILE="$STATE_DIR/notification-clicks.log"
 NOTIFIER_LOG_FILE="$STATE_DIR/terminal-notifier.log"
+SNAPSHOT_FILE="${FALCODE_SNAPSHOT_FILE:-$STATE_DIR/detect-active-opencode.snapshot.tsv}"
 ATTACHED_SESSION=""
 ATTACHED_SESSION_SCAN=""
 GHOSTTY_ACTIVATION_METHOD=""
@@ -262,12 +266,13 @@ find_attached_session() {
 
 focus_now=0
 agent="opencode"
-pane_name=""; status=""; session=""; pane_id=""
+pane_name=""; status=""; session=""; pane_id=""; pane_title_arg=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --focus-now) focus_now=1; shift;;
-    --agent)     agent="${2-}";     shift 2;;
-    --pane-name) pane_name="${2-}"; shift 2;;
+    --focus-now)  focus_now=1; shift;;
+    --agent)      agent="${2-}";          shift 2;;
+    --pane-name)  pane_name="${2-}";      shift 2;;
+    --pane-title) pane_title_arg="${2-}"; shift 2;;
     --status)    status="${2-}";    shift 2;;
     --session)   session="${2-}";   shift 2;;
     --pane-id)   pane_id="${2-}";   shift 2;;
@@ -598,15 +603,54 @@ ICON="$PROJECT_ROOT/assets/opencode-icon.icns"
 
 TN_BIN="$(command -v terminal-notifier || echo /opt/homebrew/bin/terminal-notifier)"
 
+# Resolve the live pane title — what the agent renamed the pane to, reflecting
+# the current conversation. Prefer the caller-supplied title (the Claude hook
+# pulls it straight from the transcript, always fresh); otherwise fall back to
+# the plugin's detection snapshot, which is only current while the popup is open.
+# Snapshot line format:
+#   pane<TAB>session<TAB>pane_id<TAB>tab_pos<TAB>tab_name<TAB>pane_title<TAB>cmd
+pane_title="$pane_title_arg"
+if [[ -z $pane_title && -f $SNAPSHOT_FILE ]]; then
+  pane_title="$(awk -F '\t' -v s="$session" -v p="$pane_id" '
+    $1 == "pane" && $2 == s && $3 == p { print $6; exit }
+  ' "$SNAPSHOT_FILE" 2>/dev/null || true)"
+fi
+# Mirror clean_pane_title() in src/main.rs — strip known agent prefixes + trim.
+pane_title="${pane_title#OC | }"
+pane_title="${pane_title#PI | }"
+pane_title="${pane_title#"${pane_title%%[![:space:]]*}"}"
+pane_title="${pane_title%"${pane_title##*[![:space:]]}"}"
+
+# A pane only counts as "renamed" when its title carries real context — not the
+# bare agent name (clean_pane_title's fallback) and not just the folder we'd
+# show anyway. Otherwise fall back to the folder-only heading.
+folder="$display_name"
+renamed=0
+if [[ -n $pane_title ]]; then
+  lc_title="$(printf '%s' "$pane_title" | tr '[:upper:]' '[:lower:]')"
+  lc_folder="$(printf '%s' "$folder" | tr '[:upper:]' '[:lower:]')"
+  case "$lc_title" in
+    claude|pi|opencode|"$lc_folder") ;;
+    *) renamed=1 ;;
+  esac
+fi
+
+# Icon reflects what the pane needs from the user: approval, an answer, or
+# nothing (it finished and is ready).
 case "$status" in
-  idle)       sound="Glass"; phrase="is ready";;
-  permission) sound="Funk";  phrase="is asking for permission";;
-  question)   sound="Ping";  phrase="has a question";;
-  *)          sound="";      phrase="is ${status}";;
+  idle)       sound="Glass"; icon="✅";;
+  permission) sound="Funk";  icon="🔐";;
+  question)   sound="Ping";  icon="❓";;
+  *)          sound="";      icon="🔔";;
 esac
 
-title="${display_name} ${phrase}"
-message="on session ${session}"
+if [[ $renamed -eq 1 ]]; then
+  title="${icon} ${pane_title}"
+  message="${folder} / ${session}"
+else
+  title="${icon} ${folder}"
+  message="${session}"
+fi
 
 SCRIPT_PATH="$SCRIPT_DIR/oc-notify.sh"
 esc_script=$(printf %q "$SCRIPT_PATH")
@@ -622,6 +666,10 @@ log_event "notification_created" \
   "agent" "$agent" \
   "pane_name" "$pane_name" \
   "display_name" "$display_name" \
+  "folder" "$folder" \
+  "pane_title" "$pane_title" \
+  "renamed" "$renamed" \
+  "icon" "$icon" \
   "status" "$status" \
   "session" "$session" \
   "pane_id" "$pane_id" \

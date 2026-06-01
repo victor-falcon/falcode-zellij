@@ -210,9 +210,38 @@ esac
 if [[ -n $notify_status && -x $NOTIFY_SCRIPT ]]; then
   display_name="Claude"
   [[ -n $CWD ]] && display_name="$(basename "$CWD")"
+
+  # The pane title Claude shows is its generated conversation title, stored as
+  # the latest `ai-title` entry in the transcript. Read it straight from there
+  # so the notification matches the pane even when the popup (and its snapshot)
+  # is closed.
+  pane_title=""
+  transcript_path=""
+  [[ -n $STDIN_JSON ]] && transcript_path="$(hook_field transcript_path <<<"$STDIN_JSON")"
+  if [[ -n $transcript_path && -f $transcript_path ]]; then
+    pane_title="$(python3 - "$transcript_path" <<'PY' 2>/dev/null || true
+import json, sys
+title = ""
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        for line in fh:
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            if obj.get("type") == "ai-title" and isinstance(obj.get("aiTitle"), str):
+                title = obj["aiTitle"]
+except Exception:
+    pass
+print(title)
+PY
+)"
+  fi
+
   ( "$NOTIFY_SCRIPT" \
       --agent claude \
       --pane-name "$display_name" \
+      --pane-title "$pane_title" \
       --status "$notify_status" \
       --session "$SESSION_NAME" \
       --pane-id "$PANE_ID" >/dev/null 2>&1 & )
