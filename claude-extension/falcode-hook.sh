@@ -39,10 +39,10 @@ if [[ ! -t 0 ]]; then
   STDIN_JSON="$(cat 2>/dev/null || true)"
 fi
 
-# Temporary debug log of raw hook payloads. Remove once Notification flavors
-# are well-characterized. Capped at ~256 KiB to avoid runaway growth.
-DEBUG_LOG="$STATE_ROOT/claude-hook.log"
-if [[ ${FALCODE_CLAUDE_HOOK_DEBUG:-1} != "0" ]]; then
+# Opt-in debug log of raw hook payloads (set FALCODE_CLAUDE_HOOK_DEBUG=1).
+# Off by default; capped at ~256 KiB to avoid runaway growth.
+if [[ ${FALCODE_CLAUDE_HOOK_DEBUG:-0} == "1" ]]; then
+  DEBUG_LOG="$STATE_ROOT/claude-hook.log"
   if [[ -f $DEBUG_LOG ]] && [[ $(wc -c <"$DEBUG_LOG" 2>/dev/null || echo 0) -gt 262144 ]]; then
     rm -f "$DEBUG_LOG"
   fi
@@ -53,18 +53,19 @@ if [[ ${FALCODE_CLAUDE_HOOK_DEBUG:-1} != "0" ]]; then
   } >>"$DEBUG_LOG" 2>/dev/null || true
 fi
 
-# Extract the message field from the JSON payload (Notification only).
-hook_message() {
+# Extract a top-level string field from the JSON payload (Notification only).
+hook_field() {
   python3 -c '
 import json, sys
+key = sys.argv[1]
 try:
     data = json.loads(sys.stdin.read())
 except Exception:
     sys.exit(0)
-msg = data.get("message")
-if isinstance(msg, str):
-    print(msg)
-' 2>/dev/null
+val = data.get(key)
+if isinstance(val, str):
+    print(val)
+' "$1" 2>/dev/null
 }
 
 # SessionEnd: drop the state file so the popup stops listing this pane.
@@ -81,19 +82,50 @@ case "$EVENT" in
     STATUS="working"
     ;;
   Notification)
-    # Claude fires Notification for permission prompts AND for non-permission
-    # cases like the 60s input-idle reminder or in-chat questions. Inspect
-    # the message field (not the whole JSON; keys like `permission_mode`
-    # used to cause false positives).
+    # Claude fires Notification for several distinct flavors, disambiguated by
+    # the top-level `notification_type` field (NOT the free-form `message`,
+    # whose wording is undocumented and varies — e.g. permission prompts read
+    # "Tool requires permission to execute", which matched no message regex and
+    # used to fall through to a bogus "question" notification).
+    #
+    # Only two flavors mean "the user must act":
+    #   permission_prompt  -> a tool needs approval        (asking_permissions)
+    #   elicitation_dialog -> an MCP server wants input    (waiting_user_answers)
+    # The rest are informational and must NOT raise attention:
+    #   idle_prompt          -> 60s "waiting for you" nag; duplicates the Stop
+    #                           event's idle notification.
+    #   auth_success         -> login succeeded.
+    #   elicitation_complete -> user already answered the elicitation.
+    #   elicitation_response -> response forwarded to the MCP server.
+    ntype=""
     notification_message=""
     if [[ -n $STDIN_JSON ]]; then
-      notification_message="$(hook_message <<<"$STDIN_JSON")"
+      ntype="$(hook_field notification_type <<<"$STDIN_JSON")"
+      notification_message="$(hook_field message <<<"$STDIN_JSON")"
     fi
-    if grep -qiE 'needs your permission|permission to use' <<<"$notification_message"; then
-      STATUS="asking_permissions"
-    else
-      STATUS="waiting_user_answers"
-    fi
+    case "$ntype" in
+      permission_prompt)
+        STATUS="asking_permissions"
+        ;;
+      elicitation_dialog)
+        STATUS="waiting_user_answers"
+        ;;
+      idle_prompt|auth_success|elicitation_complete|elicitation_response)
+        exit 0
+        ;;
+      "")
+        # Pre-notification_type Claude Code: fall back to message text, but only
+        # ever escalate to a permission prompt — never fabricate a question.
+        if grep -qiE 'permission' <<<"$notification_message"; then
+          STATUS="asking_permissions"
+        else
+          exit 0
+        fi
+        ;;
+      *)
+        exit 0
+        ;;
+    esac
     ;;
   Stop)
     STATUS="waiting_user_input"
