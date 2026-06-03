@@ -250,7 +250,7 @@ impl ZellijPlugin for State {
             session_name,
         );
         print_text_with_coordinates(
-            Text::new(truncate(&subtitle, cols.saturating_sub(2))).color_range(0, 8..),
+            Text::new(truncate(&subtitle, cols.saturating_sub(2))),
             0,
             0,
             Some(cols),
@@ -261,10 +261,12 @@ impl ZellijPlugin for State {
             chip(
                 &format!(" {} ", status_summary("working", &self.entries)),
                 false,
+                true,
             ),
             chip(
                 &format!(" {} ", status_summary("asking_permissions", &self.entries)),
                 false,
+                true,
             ),
             chip(
                 &format!(
@@ -272,14 +274,16 @@ impl ZellijPlugin for State {
                     status_summary("waiting_user_answers", &self.entries)
                 ),
                 false,
+                true,
             ),
             chip(
                 &format!(" {} ", status_summary("waiting_user_input", &self.entries)),
                 false,
+                true,
             ),
         ];
         if self.entries.is_empty() {
-            header_chips.push(chip(" no sessions ", true));
+            header_chips.push(chip(" no sessions ", true, false));
         }
         print!(
             "{}",
@@ -307,13 +311,13 @@ impl ZellijPlugin for State {
         if self.entries.is_empty() {
             let empty = vec![
                 NestedListItem::new("Start an OpenCode pane in any Zellij session to populate this view")
-                .color_range(0, 0..6),
+                .color_range(0, 0..5),
                 NestedListItem::new("Sessions are grouped with the current Zellij session first")
                     .indent(1)
-                    .color_range(2, 27..56),
+                    .color_range(2, 26..58),
                 NestedListItem::new("Live states appear automatically when the bundled OpenCode plugin is installed")
                     .indent(1)
-                    .color_range(2, 43..59),
+                    .color_range(2, 42..58),
             ];
             print_nested_list_with_coordinates(empty, 0, body_y + 2, Some(cols), Some(body_height));
             return;
@@ -1026,12 +1030,15 @@ fn status_color_index(status: &str) -> usize {
     }
 }
 
-fn chip(label: &str, selected: bool) -> Text {
+fn chip(label: &str, selected: bool, highlight: bool) -> Text {
     let mut text = Text::new(label).opaque();
     if selected {
         text = text.selected();
     }
-    text.color_range(0, 1..label.chars().count().saturating_sub(1))
+    if highlight {
+        text = text.color_range(0, 1..label.chars().count().saturating_sub(1));
+    }
+    text
 }
 
 fn render_footer(y: usize, cols: usize) {
