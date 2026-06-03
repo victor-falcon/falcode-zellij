@@ -1,6 +1,6 @@
 # falcode-zellij
 
-A Zellij plugin that shows all active AI agent panes across your Zellij sessions in a floating popup. It currently supports [OpenCode](https://opencode.ai), [pi](https://pi.dev), and [Claude Code](https://docs.claude.com/en/docs/claude-code). Jump to any agent pane with a single keystroke.
+A Zellij plugin that shows all active AI agent panes across your Zellij sessions in a floating popup. It currently supports [OpenCode](https://opencode.ai), [pi](https://pi.dev), and [Claude Code](https://docs.claude.com/en/docs/claude-code). Jump to any agent pane with a single keystroke, get macOS click-to-focus notifications when an agent finishes or needs your input, and see attention icons on your Zellij tabs.
 
 ![falcode-zellij screenshot](assets/screenshot.png)
 
@@ -89,6 +89,14 @@ Replace `__YOUR_HOME__` with your actual home directory (Claude Code does not ex
 
 The hook reads `ZELLIJ_PANE_ID` / `ZELLIJ_SESSION_NAME` from the environment, so panes opened outside Zellij are a no-op. Status transitions are surfaced as macOS notifications and `zellij-attention` pipes just like the OpenCode and pi integrations.
 
+The hook is smart about *which* events deserve your attention:
+
+- **Permission vs question** — Claude's `Notification` events are classified by their `notification_type`: `permission_prompt` (a tool needs approval) and `elicitation_dialog` (an MCP server wants input) raise distinct notifications; informational flavors (`idle_prompt`, `auth_success`, elicitation follow-ups) are silently ignored.
+- **No spurious "ready" pings** — Claude fires `Stop` at the end of every assistant turn, even when the session is only paused waiting for background tasks or a scheduled wakeup (`run_in_background`, crons, `/loop`). The hook checks the `background_tasks` / `session_crons` payload arrays and suppresses the idle notification until the agent has truly finished.
+- **Conversation titles** — notifications show Claude's generated conversation title (read live from the transcript), so you know *which* conversation needs you, not just which folder.
+
+Set `FALCODE_CLAUDE_HOOK_DEBUG=1` to log raw hook payloads to `~/.local/state/falcode-zellij/claude-hook.log` (auto-truncated at ~256 KiB).
+
 ### 2d. Install the notification helper script
 
 If you want macOS click-to-focus notifications, also install the helper script into the shared state directory:
@@ -99,6 +107,16 @@ curl -L https://raw.githubusercontent.com/victor-falcon/falcode-zellij/main/scri
   -o ~/.local/state/falcode-zellij/oc-notify.sh
 chmod +x ~/.local/state/falcode-zellij/oc-notify.sh
 ```
+
+Notifications carry a status icon and the pane's live conversation title, with the folder and Zellij session as context:
+
+| Status | Icon | Sound | Meaning |
+|---|---|---|---|
+| `idle` | ✅ | Glass | Agent finished — ready for you |
+| `permission` | 🔐 | Funk | A tool needs your approval |
+| `question` | ❓ | Ping | The agent is asking you something |
+
+If the pane has been renamed to a conversation title (Claude reads it from the transcript; OpenCode/pi from the detection snapshot), the notification headline shows that title — otherwise it falls back to the folder name. Clicking the notification focuses the originating pane, switching Zellij session if needed.
 
 ## Configuration
 
@@ -142,6 +160,7 @@ If a macOS notification click does not focus the expected pane/session, check:
 
 - `~/.local/state/falcode-zellij/notification-clicks.log` — notification creation + click/focus attempts, including Ghostty activation details, primary/fallback zellij commands, session client snapshots before/after, and post-checks.
 - `~/.local/state/falcode-zellij/terminal-notifier.log` — raw `terminal-notifier` output.
+- `~/.local/state/falcode-zellij/claude-hook.log` — raw Claude Code hook payloads (opt-in via `FALCODE_CLAUDE_HOOK_DEBUG=1`).
 
 ## Tab attention icons (optional)
 
