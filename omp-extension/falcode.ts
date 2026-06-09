@@ -1,7 +1,7 @@
 /**
- * Pi extension for Zellij session status reporting.
+ * Oh-My-Pi extension for Zellij session status reporting.
  *
- * Install this file into ~/.pi/agent/extensions/falcode.ts.
+ * Install this file into ~/.omp/agent/extensions/falcode.ts.
  */
 
 import {
@@ -169,18 +169,22 @@ awk -F '\t' -v current_session="$CURRENT_SESSION" -v now_ms="$NOW_MS" -v max_age
     return lower_command == "pi" || lower_command ~ /^pi[[:space:]]/ || lower_command ~ /\\/pi$/ || lower_command ~ /\\/pi[[:space:]]/ || index(lower_command, "pi-coding-agent")
   }
 
+  function is_omp_command(lower_command) {
+    return lower_command == "omp" || lower_command ~ /^omp[[:space:]]/ || lower_command ~ /\\/omp$/ || lower_command ~ /\\/omp[[:space:]]/ || index(lower_command, "omp-coding-agent")
+  }
+
   function agent_name(agent) {
-    return agent == "claude" ? "Claude" : agent == "pi" ? "Pi" : "OpenCode"
+    return agent == "claude" ? "Claude" : agent == "pi" ? "Pi" : agent == "omp" ? "OMP" : "OpenCode"
   }
 
   function is_supported_agent(agent) {
-    return agent == "opencode" || agent == "claude" || agent == "pi"
+    return agent == "opencode" || agent == "claude" || agent == "pi" || agent == "omp"
   }
 
   function is_agent_pane(title, command, lower_command, program) {
     lower_command = tolower(command)
     program = command_program(command)
-    return program == "opencode" || program == "claude" || program == "pi" || program == "pi-coding-agent" || index(lower_command, "opencode") || index(lower_command, "claude") || is_pi_command(lower_command)
+    return program == "opencode" || program == "claude" || program == "pi" || program == "omp" || program == "pi-coding-agent" || program == "omp-coding-agent" || index(lower_command, "opencode") || index(lower_command, "claude") || is_pi_command(lower_command) || is_omp_command(lower_command)
   }
 
   function print_entry(session_name, pane_id, pane_title, tab_position, tab_name, status, cwd, updated_at_ms, cwd_json) {
@@ -316,7 +320,10 @@ function ensureDetectionScript(stateRoot) {
     mode: 0o755,
   });
   try {
-    readFileSync(scriptPath, "utf8");
+    const existing = readFileSync(scriptPath, "utf8");
+    if (!existing.includes("omp")) {
+      throw new Error("Needs update");
+    }
     return;
   } catch {
     writeFileSync(scriptPath, DETECTION_SCRIPT, {
@@ -357,38 +364,9 @@ function notificationStatusFor(newStatus, prevStatus) {
   return null;
 }
 
-const ATTENTION_ACTIVE_STATES = new Set(["working"]);
-
-function sendAttentionPipe(event, paneId) {
-  if (process.env.FALCODE_DISABLE_ATTENTION === "1") return;
-  if (!event || paneId == null) return;
-  try {
-    const child = spawn(
-      "zellij",
-      ["pipe", "--name", `zellij-attention::${event}::${paneId}`],
-      { detached: true, stdio: "ignore" },
-    );
-    child.unref();
-  } catch {
-    // Best-effort: zellij-attention plugin may not be installed.
-  }
-}
-
-function attentionEventFor(newStatus, prevStatus) {
-  const wasActive = ATTENTION_ACTIVE_STATES.has(prevStatus);
-  const isActive = ATTENTION_ACTIVE_STATES.has(newStatus);
-  if (!wasActive && isActive) {
-    return process.env.FALCODE_ATTENTION_ENTER_EVENT ?? "waiting";
-  }
-  if (wasActive && !isActive) {
-    return process.env.FALCODE_ATTENTION_EXIT_EVENT ?? "completed";
-  }
-  return null;
-}
-
 function fireNotification({ notifyScript, agent, status, sessionName, paneId, cwd }) {
   if (!notifyScript) return;
-  const displayName = cwd ? path.basename(cwd) : agent === "pi" ? "Pi" : "OpenCode";
+  const displayName = cwd ? path.basename(cwd) : agent === "omp" ? "OMP" : agent === "pi" ? "Pi" : "OpenCode";
   try {
     const child = spawn(
       notifyScript,
@@ -433,7 +411,7 @@ function cleanupStalePanes(panesDir) {
   }
 }
 
-export default function (_pi) {
+export default function (_omp) {
   const paneId = process.env.ZELLIJ_PANE_ID;
   const sessionName = process.env.ZELLIJ_SESSION_NAME;
   if (!paneId || !sessionName) {
@@ -462,7 +440,7 @@ export default function (_pi) {
     const prevStatus = lastStatus;
     lastStatus = status;
     const payload = {
-      agent: "pi",
+      agent: "omp",
       cwd,
       stable_id: stableId,
       pane_id: Number.parseInt(paneId, 10),
@@ -473,15 +451,11 @@ export default function (_pi) {
     writeFileSync(stateFile, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
 
     if (!initialized || status === prevStatus) return;
-    const attentionEvent = attentionEventFor(status, prevStatus);
-    if (attentionEvent) {
-      sendAttentionPipe(attentionEvent, Number.parseInt(paneId, 10));
-    }
     const notifyStatus = notificationStatusFor(status, prevStatus);
     if (!notifyStatus) return;
     fireNotification({
       notifyScript,
-      agent: "pi",
+      agent: "omp",
       status: notifyStatus,
       sessionName,
       paneId: Number.parseInt(paneId, 10),
@@ -511,15 +485,15 @@ export default function (_pi) {
 
   process.once("exit", cleanup);
 
-  _pi.on("agent_start", async () => {
+  _omp.on("agent_start", async () => {
     writeState("working");
   });
 
-  _pi.on("agent_end", async () => {
+  _omp.on("agent_end", async () => {
     writeState("waiting_user_input");
   });
 
-  _pi.on("session_shutdown", async () => {
+  _omp.on("session_shutdown", async () => {
     cleanup();
   });
 }

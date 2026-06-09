@@ -1113,7 +1113,7 @@ fn detection_error_message(exit_code: Option<i32>, stderr: &str) -> String {
 }
 
 fn is_supported_agent(agent: &str) -> bool {
-    matches!(agent, "opencode" | "claude" | "pi")
+    matches!(agent, "opencode" | "claude" | "pi" | "omp")
 }
 
 fn is_agent_pane(details: &PaneDetails) -> bool {
@@ -1133,13 +1133,21 @@ fn is_pi_command(lower: &str) -> bool {
         || lower.contains("pi-coding-agent")
 }
 
+fn is_omp_command(lower: &str) -> bool {
+    lower == "omp"
+        || lower.starts_with("omp ")
+        || lower.ends_with("/omp")
+        || lower.contains("/omp ")
+        || lower.contains("omp-coding-agent")
+}
+
 fn is_agent_command(command: Option<&str>) -> bool {
     match command {
         Some(cmd) => match command_program_name(cmd) {
-            Some("opencode" | "claude" | "pi" | "pi-coding-agent") => true,
+            Some("opencode" | "claude" | "pi" | "pi-coding-agent" | "omp" | "omp-coding-agent") => true,
             _ => {
                 let lower = cmd.to_ascii_lowercase();
-                lower.contains("opencode") || lower.contains("claude") || is_pi_command(&lower)
+                lower.contains("opencode") || lower.contains("claude") || is_pi_command(&lower) || is_omp_command(&lower)
             }
         },
         None => false,
