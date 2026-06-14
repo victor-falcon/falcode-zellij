@@ -33,9 +33,9 @@ NOTIFIER_LOG_FILE="$STATE_DIR/terminal-notifier.log"
 SNAPSHOT_FILE="${FALCODE_SNAPSHOT_FILE:-$STATE_DIR/detect-active-opencode.snapshot.tsv}"
 ATTACHED_SESSION=""
 ATTACHED_SESSION_SCAN=""
-GHOSTTY_ACTIVATION_METHOD=""
-GHOSTTY_ACTIVATION_STATUS=1
-GHOSTTY_ACTIVATION_OUTPUT=""
+TERMINAL_ACTIVATION_METHOD=""
+TERMINAL_ACTIVATION_STATUS=1
+TERMINAL_ACTIVATION_OUTPUT=""
 
 ensure_log_dir() {
   mkdir -p "$STATE_DIR" 2>/dev/null || true
@@ -177,21 +177,21 @@ confirm_target_focus() {
   printf -v "$__confirmed_var_name" '%s' "$confirmed"
 }
 
-activate_ghostty() {
+activate_terminal() {
   local output=""
   local rc=1
   local notes=""
   local terminal_app="${FALCODE_TERMINAL_APP:-Ghostty}"
 
-  GHOSTTY_ACTIVATION_METHOD="none"
-  GHOSTTY_ACTIVATION_STATUS=1
-  GHOSTTY_ACTIVATION_OUTPUT=""
+  TERMINAL_ACTIVATION_METHOD="none"
+  TERMINAL_ACTIVATION_STATUS=1
+  TERMINAL_ACTIVATION_OUTPUT=""
 
   if [[ -x /usr/bin/osascript ]]; then
     if run_capture output /usr/bin/osascript -e "tell application \"${terminal_app}\" to activate"; then
-      GHOSTTY_ACTIVATION_METHOD="osascript"
-      GHOSTTY_ACTIVATION_STATUS=0
-      GHOSTTY_ACTIVATION_OUTPUT="$output"
+      TERMINAL_ACTIVATION_METHOD="osascript"
+      TERMINAL_ACTIVATION_STATUS=0
+      TERMINAL_ACTIVATION_OUTPUT="$output"
       return 0
     else
       rc=$?
@@ -204,9 +204,9 @@ activate_ghostty() {
 
   if [[ -x /usr/bin/open ]]; then
     if run_capture output /usr/bin/open -a "${terminal_app}"; then
-      GHOSTTY_ACTIVATION_METHOD="open"
-      GHOSTTY_ACTIVATION_STATUS=0
-      GHOSTTY_ACTIVATION_OUTPUT="${notes}open_output:"$'\n'"${output}"
+      TERMINAL_ACTIVATION_METHOD="open"
+      TERMINAL_ACTIVATION_STATUS=0
+      TERMINAL_ACTIVATION_OUTPUT="${notes}open_output:"$'\n'"${output}"
       return 0
     else
       rc=$?
@@ -217,9 +217,9 @@ activate_ghostty() {
     notes+="open_missing=1"$'\n'
   fi
 
-  GHOSTTY_ACTIVATION_METHOD="failed"
-  GHOSTTY_ACTIVATION_STATUS="$rc"
-  GHOSTTY_ACTIVATION_OUTPUT="$notes"
+  TERMINAL_ACTIVATION_METHOD="failed"
+  TERMINAL_ACTIVATION_STATUS="$rc"
+  TERMINAL_ACTIVATION_OUTPUT="$notes"
   return 1
 }
 
@@ -318,9 +318,9 @@ if [[ $focus_now -eq 1 ]]; then
   fallback_followup_command_exit_status=1
   worked="unknown"
   what_happened="notification click did not produce a confirmed focus"
-  ghostty_activation_method=""
-  ghostty_activation_status=1
-  ghostty_activation_output=""
+  terminal_activation_method=""
+  terminal_activation_status=1
+  terminal_activation_output=""
 
   for attempt in 1 2 3; do
     attempt_count=$attempt
@@ -331,10 +331,10 @@ if [[ $focus_now -eq 1 ]]; then
       *) activation_settle_delay=0.25; post_action_delay=0.25 ;;
     esac
 
-    activate_ghostty || true
-    ghostty_activation_method="$GHOSTTY_ACTIVATION_METHOD"
-    ghostty_activation_status="$GHOSTTY_ACTIVATION_STATUS"
-    ghostty_activation_output="$GHOSTTY_ACTIVATION_OUTPUT"
+    activate_terminal || true
+    terminal_activation_method="$TERMINAL_ACTIVATION_METHOD"
+    terminal_activation_status="$TERMINAL_ACTIVATION_STATUS"
+    terminal_activation_output="$TERMINAL_ACTIVATION_OUTPUT"
     sleep "$activation_settle_delay"
 
     attached_session=""
@@ -471,9 +471,9 @@ if [[ $focus_now -eq 1 ]]; then
     attempts_log+="attempt=${attempt}"$'\n'
     attempts_log+="activation_settle_delay=${activation_settle_delay}"$'\n'
     attempts_log+="post_action_delay=${post_action_delay}"$'\n'
-    attempts_log+="ghostty_activation_method=${ghostty_activation_method}"$'\n'
-    attempts_log+="ghostty_activation_status=${ghostty_activation_status}"$'\n'
-    attempts_log+="ghostty_activation_output:"$'\n'"${ghostty_activation_output}"$'\n'
+    attempts_log+="terminal_activation_method=${terminal_activation_method}"$'\n'
+    attempts_log+="terminal_activation_status=${terminal_activation_status}"$'\n'
+    attempts_log+="terminal_activation_output:"$'\n'"${terminal_activation_output}"$'\n'
     attempts_log+="attached_session_before=${attached_session}"$'\n'
     attempts_log+="attached_session_clients_before_exit_status=${attached_session_clients_before_status}"$'\n'
     attempts_log+="attached_session_clients_before_output:"$'\n'"${attached_session_clients_before_output}"$'\n'
@@ -551,9 +551,9 @@ if [[ $focus_now -eq 1 ]]; then
     "target_pane_arg" "$target_pane" \
     "attempt_count" "$attempt_count" \
     "attempts_log" "$attempts_log" \
-    "ghostty_activation_method" "$ghostty_activation_method" \
-    "ghostty_activation_status" "$ghostty_activation_status" \
-    "ghostty_activation_output" "$ghostty_activation_output" \
+    "terminal_activation_method" "$terminal_activation_method" \
+    "terminal_activation_status" "$terminal_activation_status" \
+    "terminal_activation_output" "$terminal_activation_output" \
     "attached_session_before" "$attached_session" \
     "attached_session_scan_before" "$attached_session_scan" \
     "attached_session_clients_before_exit_status" "$attached_session_clients_before_status" \
@@ -661,7 +661,7 @@ esc_session=$(printf %q "$session")
 esc_pane_id=$(printf %q "$pane_id")
 
 # Decide same-session vs cross-session at click time, not notification time.
-# The focus-now path activates Ghostty itself and retries the zellij action.
+# The focus-now path activates the terminal app and retries the zellij action.
 exec_cmd="${esc_script} --focus-now --session ${esc_session} --pane-id ${esc_pane_id}"
 
 log_event "notification_created" \
