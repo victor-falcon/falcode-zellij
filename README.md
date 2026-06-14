@@ -114,6 +114,8 @@ Then restart oh-my-pi or run `/reload` inside oh-my-pi.
 
 If you want macOS click-to-focus notifications, also install the helper script into the shared state directory:
 
+> **Note:** The notification click handler activates your terminal app via AppleScript/`open`. By default it targets **Ghostty**. If you use a different terminal, set `FALCODE_TERMINAL_APP` in your shell environment (e.g. `export FALCODE_TERMINAL_APP="Alacritty"` in your `.zshrc` or `.bashrc`).
+
 ```bash
 mkdir -p ~/.local/state/falcode-zellij
 curl -L https://raw.githubusercontent.com/victor-falcon/falcode-zellij/main/scripts/oc-notify.sh \
@@ -220,6 +222,7 @@ If zellij-attention isn't installed, the pipe is a harmless no-op.
 | `FALCODE_DISABLE_ATTENTION=1` | Disable attention pipes entirely |
 | `FALCODE_ATTENTION_ENTER_EVENT` | Event name on enter-active (default `waiting`) |
 | `FALCODE_ATTENTION_EXIT_EVENT` | Event name on exit-active (default `completed`) |
+| `FALCODE_TERMINAL_APP` | Terminal app to focus on notification click (default `Ghostty`; e.g. `Alacritty`, `iTerm2`, `WezTerm`) |
 
 ## Usage
 

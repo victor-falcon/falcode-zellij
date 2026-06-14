@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Fires a macOS notification for a Falcode-tracked agent pane status change.
-# Click focuses Ghostty and the target zellij pane.
+# Click focuses the terminal app and the target zellij pane.
+# Set FALCODE_TERMINAL_APP to override the terminal (default: Ghostty).
+# Example: export FALCODE_TERMINAL_APP="Alacritty"
 set -euo pipefail
 
 usage() {
@@ -179,13 +181,14 @@ activate_ghostty() {
   local output=""
   local rc=1
   local notes=""
+  local terminal_app="${FALCODE_TERMINAL_APP:-Ghostty}"
 
   GHOSTTY_ACTIVATION_METHOD="none"
   GHOSTTY_ACTIVATION_STATUS=1
   GHOSTTY_ACTIVATION_OUTPUT=""
 
   if [[ -x /usr/bin/osascript ]]; then
-    if run_capture output /usr/bin/osascript -e 'tell application "Ghostty" to activate'; then
+    if run_capture output /usr/bin/osascript -e "tell application \"${terminal_app}\" to activate"; then
       GHOSTTY_ACTIVATION_METHOD="osascript"
       GHOSTTY_ACTIVATION_STATUS=0
       GHOSTTY_ACTIVATION_OUTPUT="$output"
@@ -200,7 +203,7 @@ activate_ghostty() {
   fi
 
   if [[ -x /usr/bin/open ]]; then
-    if run_capture output /usr/bin/open -a Ghostty; then
+    if run_capture output /usr/bin/open -a "${terminal_app}"; then
       GHOSTTY_ACTIVATION_METHOD="open"
       GHOSTTY_ACTIVATION_STATUS=0
       GHOSTTY_ACTIVATION_OUTPUT="${notes}open_output:"$'\n'"${output}"
