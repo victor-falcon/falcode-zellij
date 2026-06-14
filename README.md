@@ -114,7 +114,7 @@ Then restart oh-my-pi or run `/reload` inside oh-my-pi.
 
 If you want macOS click-to-focus notifications, also install the helper script into the shared state directory:
 
-> **Note:** The notification click handler requires **Ghostty** as your terminal. Other terminals (Alacritty, iTerm2, etc.) do not support the AppleScript activation used to focus the terminal window on click.
+> **Note:** The notification click handler requires **Ghostty** as your terminal.
 
 ```bash
 mkdir -p ~/.local/state/falcode-zellij
